@@ -1,0 +1,99 @@
+/*-*-sql-*-
+ * sa.rpi-sensehat.osql — OSQL definitions for the Sense HAT datapump extension
+ *
+ * The sensehat extension uses sa_datapump with per-signal flow routing.
+ * A background thread reads the I2C sensors and pushes tagged items into
+ * a circular buffer.  SA Engine consumers select desired signals via
+ * subscribe or subscribe:merge.
+ *
+ * Flow topics:
+ *   sensehat:accel    — Timeval([ax,ay,az])   at IMU ODR
+ *   sensehat:gyro     — Timeval([gx,gy,gz])   at IMU ODR (if enabled)
+ *   sensehat:pressure — Timeval(hPa)          at env_ms
+ *   sensehat:temp     — Timeval(°C)           at env_ms
+ *
+ * Load with:
+ *   sa.engine -O sa.rpi-sensehat.osql
+ * or from within a session:
+ *   load_osql('sa.rpi-sensehat.osql');
+ */
+
+load_extension("rpi-sensehat");
+
+/* ================================================================
+ * Pump registration
+ * ================================================================ */
+
+/* Register the sensehat datapump.
+ * Must be called before subscribing.  The pump (and its I2C reader
+ * thread) starts lazily on the first subscribe("sensehat:…").
+ *
+ * odr         — LSM9DS1 output data rate (1-6):
+ *               1=14.9Hz 2=59.5Hz 3=119Hz 4=238Hz 5=476Hz 6=952Hz
+ * bufsize     — circular-buffer capacity in items
+ * env_ms      — pressure/temp polling interval in ms (0 = disabled)
+ * enable_gyro — 0 = accel only (saves I2C bandwidth),
+ *               1 = accel + gyro
+ */
+create function register_sensehat_pump(Integer odr, Integer bufsize,
+                                       Integer env_ms, Integer enable_gyro)
+  -> Charstring
+  as foreign 'register-sensehat-pump----+';
+
+/* Stop a running pump so it can be re-registered with new settings.
+ * Returns 1 if a pump was stopped, 0 if nothing was running.
+ */
+create function sensehat:stop() -> Integer
+  as foreign 'sensehat-stop+';
+
+/* ================================================================
+ * Stream access
+ * ================================================================ */
+
+/* Subscribe to a single sensehat flow by name.
+ * flow_name is one of: "accel", "gyro", "pressure", "temp".
+ */
+create function sensehat:flow(Charstring flow_name)
+  -> Stream of Timeval
+  as subscribe("sensehat:" + flow_name);
+
+/* Build the full topic vector for a set of flow names. */
+create function sensehat:flow_topics(Vector of Charstring flows)
+  -> Vector of Charstring
+  as select Vector of "sensehat:" + f
+       from Charstring f
+      where f in flows;
+
+/* Subscribe to multiple sensehat flows merged into one stream.
+ * flows is a vector of one or more of: "accel", "gyro", "pressure", "temp".
+ *
+ * Example:
+ *   sensehat:signal_flows(["accel","temp"])
+ */
+create function sensehat:signal_flows(Vector of Charstring flows)
+  -> Stream of Timeval
+  as subscribe:merge(sensehat:flow_topics(flows));
+
+/* ================================================================
+ * Payload accessors
+ *
+ * Each item is Timeval of [flow_name, payload].
+ * ================================================================ */
+
+/* Flow name string ("accel", "gyro", "pressure", "temp"). */
+create function sensehat:topic(Timeval tv) -> Charstring as value(tv)[1];
+
+/* Raw payload (second element of the wrapper vector). */
+create function sensehat:payload(Timeval tv) -> Object as value(tv)[2];
+
+/* 3-vector payload (accel or gyro items). */
+create function sensehat:xyz(Timeval tv) -> Vector of Real as value(tv)[2];
+
+/* Scalar payload (pressure or temp items). */
+create function sensehat:scalar(Timeval tv) -> Real as value(tv)[2];
+
+/* Acceleration magnitude (g) — for accel items. */
+create function sensehat:accel_mag(Timeval tv) -> Real
+  as select sqrt(v[1]*v[1] + v[2]*v[2] + v[3]*v[3])
+       from Vector of Real v
+      where v = sensehat:xyz(tv);
