@@ -58,11 +58,12 @@ validate "accel timestamp is valid"
          > |2020-01-01T00:00:00Z| => true;
 
 validate "accel magnitude near 1g when stationary"
-   check roundto(avg(select sensehat:accel_mag(v)
-                       from Timeval v
-                      where v in extract(first_n(sensehat:flow("accel"), 10))),
-                 0)
-         => 1;
+   check roundto(avg(select am
+                       from Timeval v, real am
+                      where v in extract(first_n(sensehat:flow("accel"), 10))
+and am = sensehat:accel_mag(v) and optional(print(am))),
+                 1)
+         => 1.0;
 
 /* ---- pressure flow ---- */
 
