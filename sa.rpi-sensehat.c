@@ -84,8 +84,44 @@ extern ohandle a_timestamp(time_t seconds, int useconds, ohandle o);
 #define LPS_PRESS_OUT_XL 0x28
 
 /* ---- Conversion factors ---- */
-#define ACCEL_SCALE (16.0 / 32768.0)   /* ±16 g     */
+#define ACCEL_SCALE (0.000244)          /* ±8g: 0.244 mg/LSB per LSM9DS1 datasheet */
 #define GYRO_SCALE  (2000.0 / 32768.0) /* ±2000 dps */
+
+/* ---- Accelerometer calibration loaded from /etc/RTIMULib.ini ---- */
+/* 6-position gravity calibration; corrected = 2*(raw-min)/(max-min) - 1  */
+/* Falls back to identity (min=-1, max=1) when file is absent or invalid.  */
+
+#define RTIMULIB_INI "/etc/RTIMULib.ini"
+
+typedef struct {
+    double min_x, max_x;
+    double min_y, max_y;
+    double min_z, max_z;
+} accel_cal_t;
+
+static accel_cal_t accel_cal = { -1.0, 1.0, -1.0, 1.0, -1.0, 1.0 };
+
+static void load_accel_cal(void) {
+    FILE *f = fopen(RTIMULIB_INI, "r");
+    if (!f) return;
+
+    accel_cal_t c = { -1.0, 1.0, -1.0, 1.0, -1.0, 1.0 };
+    int valid = 0;
+    char line[256], key[64], sval[64];
+
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%63[^=]=%63s", key, sval) != 2) continue;
+        if      (strcmp(key, "AccelCalValid") == 0) valid = strcmp(sval, "true") == 0;
+        else if (strcmp(key, "AccelCalMinX")  == 0) sscanf(sval, "%lf", &c.min_x);
+        else if (strcmp(key, "AccelCalMaxX")  == 0) sscanf(sval, "%lf", &c.max_x);
+        else if (strcmp(key, "AccelCalMinY")  == 0) sscanf(sval, "%lf", &c.min_y);
+        else if (strcmp(key, "AccelCalMaxY")  == 0) sscanf(sval, "%lf", &c.max_y);
+        else if (strcmp(key, "AccelCalMinZ")  == 0) sscanf(sval, "%lf", &c.min_z);
+        else if (strcmp(key, "AccelCalMaxZ")  == 0) sscanf(sval, "%lf", &c.max_z);
+    }
+    fclose(f);
+    if (valid) accel_cal = c;
+}
 
 /* ---- SA Engine error codes (registered in a_initialize_extension) ---- */
 static int SENSEHAT_INVALID_ODR;
@@ -192,8 +228,8 @@ static int lsm_init(int fd, int odr_bits, int gyro_enabled) {
         i2c_write_byte(fd, LSM_CTRL_REG1_G,  0x00);   /* gyro off       */
     }
 
-    /* Accel: selected ODR, ±16 g */
-    i2c_write_byte(fd, LSM_CTRL_REG6_XL, (odr_bits << 5) | 0x08);
+    /* Accel: selected ODR, ±8 g */
+    i2c_write_byte(fd, LSM_CTRL_REG6_XL, (odr_bits << 5) | 0x18);
     i2c_write_byte(fd, LSM_CTRL_REG5_XL, 0x38);   /* accel X/Y/Z on    */
     i2c_write_byte(fd, LSM_CTRL_REG9,    0x02);   /* FIFO enable       */
     i2c_write_byte(fd, LSM_FIFO_CTRL,    0xC0);   /* FIFO continuous   */
@@ -208,9 +244,11 @@ static int lsm_fifo_count(int fd) {
 static int lsm_read_accel(int fd, double *ax, double *ay, double *az) {
     uint8_t buf[6];
     if (i2c_read_bytes(fd, LSM_OUT_X_L_XL, buf, 6) < 0) return -1;
-    *ax = to_i16(buf[0], buf[1]) * ACCEL_SCALE;
-    *ay = to_i16(buf[2], buf[3]) * ACCEL_SCALE;
-    *az = to_i16(buf[4], buf[5]) * ACCEL_SCALE;
+#define APPLY_CAL(v, mn, mx) (2.0 * ((v) - (mn)) / ((mx) - (mn)) - 1.0)
+    *ax = APPLY_CAL(to_i16(buf[0], buf[1]) * ACCEL_SCALE, accel_cal.min_x, accel_cal.max_x);
+    *ay = APPLY_CAL(to_i16(buf[2], buf[3]) * ACCEL_SCALE, accel_cal.min_y, accel_cal.max_y);
+    *az = APPLY_CAL(to_i16(buf[4], buf[5]) * ACCEL_SCALE, accel_cal.min_z, accel_cal.max_z);
+#undef APPLY_CAL
     return 0;
 }
 
@@ -536,6 +574,7 @@ static ohandle register_sensehat_pumpBBF(a_callcontext cxt) {
  * ================================================================ */
 
 EXPORT void a_initialize_extension() {
+    load_accel_cal();
     a_extimpl("register-sensehat-pump----+", register_sensehat_pumpBBF);
     a_extimpl("sensehat-stop+",              sensehat_stopBF);
     SENSEHAT_INVALID_ODR =
