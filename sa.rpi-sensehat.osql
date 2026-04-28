@@ -42,6 +42,13 @@ create function register_sensehat_pump(Integer odr, Integer bufsize,
 
 /* Stop a running pump so it can be re-registered with new settings.
  * Returns 1 if a pump was stopped, 0 if nothing was running.
+ *
+ * After calling stop(), wait at least 1-2 s before calling
+ * register_sensehat_pump again.  lsm_init issues a SW reset (usleep 100 ms)
+ * and lps_init issues a SW reset (usleep 50 ms), but the I2C WHO_AM_I check
+ * can still fail if the bus hasn't fully settled from the previous session.
+ * A brief sleep on the caller side avoids the "LSM9DS1 not found" error that
+ * appears after rapid stop/restart cycles.
  */
 create function sensehat:stop() -> Integer
   as foreign 'sensehat-stop+';
@@ -73,6 +80,22 @@ create function sensehat:flow_topics(Vector of Charstring flows)
 create function sensehat:signal_flows(Vector of Charstring flows)
   -> Stream of Timeval
   as subscribe:merge(sensehat:flow_topics(flows));
+
+/* Like sensehat:signal_flows but discards any items timestamped before `since`.
+ * Use this after a stop/restart to drop lingering items that survived the
+ * previous session's teardown.  Capture now() before registering the pump so
+ * that all legitimately fresh items pass through:
+ *
+ *   set :t0 = now();
+ *   register_sensehat_pump(2, 2048, 500, 0);
+ *   ... consume sensehat:flows_after(["accel","pressure"], :t0) ...
+ */
+create function sensehat:flows_after(Vector of Charstring flows, Timeval since)
+  -> Stream of Timeval
+  as select Stream of v
+       from Timeval v
+      where v in sensehat:signal_flows(flows)
+        and timestamp(v) >= since;
 
 /* ================================================================
  * Payload accessors
