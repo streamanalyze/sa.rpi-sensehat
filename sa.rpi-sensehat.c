@@ -44,6 +44,7 @@
 
 #include "sa_core.h"
 #include "sa_datapump.h"
+#include "sa_lisp.h"
 #include "sa_syscalls.h"
 #include "sa_threads.h"
 
@@ -521,6 +522,13 @@ static ohandle sensehat_stopBF(a_callcontext cxt) {
         sa_datapump_destroy(g_pump);
         /* Let consumer thread drain and exit before re-use. */
         a_sleep(0.2);
+        /* Drop the engine's reference so shutdown does not invoke the
+           registered stopper on this already stopped pump. */
+        ohandle rname = mkstring("sensehat");
+        ohandle rres  = call_lisp(mksymbol("reset-ext-pubsub-instance"),
+                                  NULL, 1, rname);
+        a_free(rname);
+        a_free(rres);
         g_pump = NULL;
         /* g_ctx freed by next starter call */
         stopped = 1;
