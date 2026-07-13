@@ -524,9 +524,10 @@ static ohandle sensehat_stopBF(a_callcontext cxt) {
         a_sleep(0.2);
         /* Drop the engine's reference so shutdown does not invoke the
            registered stopper on this already stopped pump. */
-        ohandle rname = mkstring("sensehat");
-        ohandle rres  = call_lisp(mksymbol("reset-ext-pubsub-instance"),
-                                  NULL, 1, rname);
+        ohandle rname = nil, rres = nil;
+        a_setf(rname, mkstring("sensehat"));
+        a_setf(rres, call_lisp(mksymbol("reset-ext-pubsub-instance"),
+                               NULL, 1, rname));
         a_free(rname);
         a_free(rres);
         g_pump = NULL;
