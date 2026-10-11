@@ -7,10 +7,15 @@
  * subscribe or subscribe:merge.
  *
  * Flow topics:
- *   sensehat:accel    — Timeval([ax,ay,az])   at IMU ODR
- *   sensehat:gyro     — Timeval([gx,gy,gz])   at IMU ODR (if enabled)
- *   sensehat:pressure — Timeval(hPa)          at env_ms
- *   sensehat:temp     — Timeval(°C)           at env_ms
+ *   sensehat:accel         — Timeval([ax,ay,az]) g     at IMU ODR
+ *   sensehat:gyro          — Timeval([gx,gy,gz]) dps   at IMU ODR (if enabled)
+ *   sensehat:pressure      — Timeval(hPa)              at env_ms
+ *   sensehat:temp          — Timeval(°C, LPS25H)       at env_ms
+ *   sensehat:humidity      — Timeval(%rH)              at env_ms
+ *   sensehat:humidity_temp — Timeval(°C, HTS221)       at env_ms
+ *   sensehat:mag           — Timeval([mx,my,mz]) µT    at mag_ms    (pump_ex)
+ *   sensehat:colour        — Timeval([r,g,b,c])        at colour_ms (pump_ex, v2 only)
+ *   sensehat:joystick      — Timeval([dir,action])     on events    (pump_ex)
  *
  * Load with:
  *   sa.engine -O sa.rpi-sensehat.osql
@@ -40,6 +45,21 @@ create function register_sensehat_pump(Integer odr, Integer bufsize,
   -> Charstring
   as foreign 'register-sensehat-pump----+';
 
+/* Register the sensehat datapump with all sensors.
+ * Like register_sensehat_pump, plus:
+ * mag_ms      — magnetometer polling interval in ms (0 = disabled)
+ * colour_ms   — colour sensor polling interval in ms (0 = disabled;
+ *               the sensor integrates for 154 ms, so >= 154 is useful)
+ * joystick    — 1 = stream joystick events, 0 = off
+ * Registering while a pump runs stops the running pump first.
+ */
+create function register_sensehat_pump_ex(Integer odr, Integer bufsize,
+                                          Integer env_ms, Integer enable_gyro,
+                                          Integer mag_ms, Integer colour_ms,
+                                          Integer joystick)
+  -> Charstring
+  as foreign 'register-sensehat-pump-ex-------+';
+
 /* Stop a running pump so it can be re-registered with new settings.
  * Returns 1 if a pump was stopped, 0 if nothing was running.
  *
@@ -58,7 +78,8 @@ create function sensehat:stop() -> Integer
  * ================================================================ */
 
 /* Subscribe to a single sensehat flow by name.
- * flow_name is one of: "accel", "gyro", "pressure", "temp".
+ * flow_name is one of: "accel", "gyro", "pressure", "temp", "humidity",
+ * "humidity_temp", "mag", "colour", "joystick".
  */
 create function sensehat:flow(Charstring flow_name)
   -> Stream of Timeval
@@ -120,3 +141,38 @@ create function sensehat:accel_mag(Timeval tv) -> Real
   as select sqrt(v[1]*v[1] + v[2]*v[2] + v[3]*v[3])
        from Vector of Real v
       where v = sensehat:xyz(tv);
+
+/* 4-vector payload [r, g, b, clear] (colour items, raw counts). */
+create function sensehat:rgbc(Timeval tv) -> Vector of Integer as value(tv)[2];
+
+/* Joystick payload [direction, action]:
+ * direction "up" | "down" | "left" | "right" | "middle",
+ * action "press" | "release" | "hold". */
+create function sensehat:key(Timeval tv) -> Vector of Charstring as value(tv)[2];
+
+/* ================================================================
+ * LED matrix (8x8). Independent of the pump. Colours are 0-255 and
+ * stored as RGB565, so reading back quantises to multiples of 8
+ * (red, blue) and 4 (green). x = column, y = row, both 0-7.
+ * ================================================================ */
+
+/* Fill all 64 pixels with one colour. */
+create function sensehat:led_clear(Integer r, Integer g, Integer b) -> Integer
+  as foreign 'sensehat-led-clear---+';
+
+/* Set one pixel. */
+create function sensehat:led_pixel(Integer x, Integer y,
+                                   Integer r, Integer g, Integer b) -> Integer
+  as foreign 'sensehat-led-pixel-----+';
+
+/* Set all pixels: 64 x [r, g, b], row-major (index = y*8 + x). */
+create function sensehat:led_pixels(Vector px) -> Integer
+  as foreign 'sensehat-led-pixels-+';
+
+/* Read the 64 pixels back from the display as [r, g, b]. */
+create function sensehat:led_get_pixels() -> Vector
+  as foreign 'sensehat-led-get-pixels+';
+
+/* Dim (1) or normal (0) brightness via the driver's gamma table. */
+create function sensehat:led_low_light(Integer enable) -> Integer
+  as foreign 'sensehat-led-low-light-+';
