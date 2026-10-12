@@ -10,7 +10,7 @@
 
 load_osql('sa.rpi-sensehat.osql');
 
-register_sensehat_pump_ex(2, 4096, 200, 0, 50, 200, 0);
+register_sensehat_pump(2, 4096, 1, 0, 200, 200, 50, 200, 0);
 
 validate "colour payload is [r,g,b,c] of non-negative counts"
    check select dim(c) = 4 and c[1] >= 0 and c[2] >= 0 and c[3] >= 0 and c[4] >= 0

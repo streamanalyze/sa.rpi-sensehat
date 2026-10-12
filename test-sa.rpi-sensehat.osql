@@ -2,7 +2,8 @@
  * test-sa.rpi-sensehat.osql — validation test for the sensehat datapump extension
  *
  * Tests multi-flow datapump, stop/restart, ODR cycling, re-register while
- * running, register_sensehat_pump_ex (humidity, mag, joystick) and the
+ * running, the 9-argument register (humidity, mag, joystick, accel off),
+ * the I2C bus budget check and the
  * LED matrix. Works on Sense HAT v1 and v2; the v2-only colour sensor is
  * tested in test-sa.rpi-sensehat-v2.osql.
  *
@@ -94,14 +95,6 @@ validate "signal_flows merges accel and temp"
    check count(extract(first_n(sensehat:signal_flows(["accel","temp"]), 10)))
          => 10;
 
-/* ---- rate at ODR 6 ---- */
-
-set :a = count_accel_samples(4);
-print("accel rate at ODR-6 (952 Hz): " + :a);
-validate "accel rate at ODR 6"
-check avg(:a) > 900 => TRUE
-check avg(:a) < 1000 => TRUE;
-
 /* ================================================================
  * Helper: average the last N windows of a sample-rate vector.
  *
@@ -116,6 +109,20 @@ create function tail_avg(Vector of Real v, Integer skip) -> Real
   as avg(select v[i]
            from Integer i
           where i > skip and i <= dim(v));
+
+/* ---- rate at ODR 6 ----
+ * Needs the Pi's VPU core clock fixed (core_freq_min=500): with the
+ * ondemand governor it drops to 300 MHz after a few seconds and the I2C
+ * clock with it, and the rate falls to ~500 Hz. The chip really runs at
+ * ~970 Hz, and samples are stamped when read, so a window after a late
+ * FIFO read can hold ~1080: hence the upper bound of 1050. */
+
+set :a = count_accel_samples(6);
+print("accel rate at ODR-6 (952 Hz) windows: " + :a);
+print("  steady-state avg (skip first 2): " + tail_avg(:a, 2));
+validate "accel rate at ODR 6"
+check tail_avg(:a, 2) > 900 => TRUE
+check tail_avg(:a, 2) < 1050 => TRUE;
 
 /* ================================================================
  * ODR 5 (476 Hz) — stop, re-register, measure
@@ -213,10 +220,36 @@ validate "accel flows after re-register while running"
    check count(extract(first_n(sensehat:flow("accel"), 5))) => 5;
 
 /* ================================================================
- * register_sensehat_pump_ex — humidity, magnetometer, colour, joystick
+ * I2C bus budget: a request the bus cannot serve raises an error.
+ * 6-byte transactions/s: accel + gyro at ODR 6 = 2 x 952, plus pressure,
+ * humidity, mag and colour polled every 1 ms = 4 x 1000 -> 5904, over the
+ * budget at any bus clock up to ~500 kHz. Gyro without accel is refused.
  * ================================================================ */
 
-register_sensehat_pump_ex(2, 4096, 200, 1, 50, 200, 1);
+validate "I2C bus budget"
+   check register_sensehat_pump(6, 2048, 1, 1, 1, 1, 1, 1, 0)
+         => ["*error*", "sensehat: request exceeds the I2C bus budget (lower odr, turn gyro off or poll slower)", 5904]
+   check register_sensehat_pump(6, 2048, 0, 1, 0, 0, 0, 0, 0)
+         => ["*error*", "sensehat: gyro needs accel (the LSM9DS1 FIFO pairs them)", 1]
+   check register_sensehat_pump(6, 2048, 1, 0, 1000, 1000, 50, 200, 1) => "sensehat"
+   check register_sensehat_pump(5, 2048, 1, 1, 0, 0, 0, 0, 0) => "sensehat";
+
+/* ================================================================
+ * Accel and gyro off: the IMU is not read, the other sensors still are
+ * ================================================================ */
+
+set :t_off = now();
+register_sensehat_pump(1, 512, 0, 0, 200, 0, 0, 0, 0);
+validate "IMU off: pressure flows, accel does not"
+   check count(extract(first_n(sensehat:flows_after(["pressure"], :t_off), 2))) => 2
+   check count(extract(first_n(timeout(sensehat:flows_after(["accel"], :t_off), 1.5), 1))) => 0;
+sensehat:stop();
+
+/* ================================================================
+ * 9-argument register — humidity, magnetometer, colour, joystick
+ * ================================================================ */
+
+register_sensehat_pump(2, 4096, 1, 1, 200, 200, 50, 200, 1);
 
 validate "humidity in range (%rH)"
    check select sensehat:scalar(v) >= 0 and sensehat:scalar(v) <= 100

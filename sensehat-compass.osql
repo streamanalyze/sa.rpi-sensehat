@@ -6,7 +6,7 @@
  *   load_osql('sa.rpi-sensehat.osql');
  *   load_osql('sensehat-streams.osql');
  *   load_osql('sensehat-compass.osql');
- *   register_sensehat_pump_ex(2, 4096, 1000, 0, 50, 0, 0);
+ *   register_sensehat_pump(2, 4096, 1, 0, 0, 0, 50, 0, 0);
  *   sensehat:mag_calibrate(30);     -- rotate the board through all orientations
  *   sensehat:heading();
  */

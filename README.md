@@ -15,7 +15,7 @@ group-by-topic aggregations, and edge ML pipelines.
 | --- | --- | --- |
 | LSM9DS1 | accelerometer (±8 g), gyroscope (±2000 dps) | configurable, 14.9 Hz – 952 Hz |
 | LPS25H | barometric pressure (hPa), temperature (°C) | configurable polling, 0 = disabled |
-| HTS221 | relative humidity (%rH), temperature (°C) | polled with the pressure sensor (`env_ms`) |
+| HTS221 | relative humidity (%rH), temperature (°C) | polled every `humidity_ms` (`env_ms` in the 4-argument register) |
 | LSM9DS1 magnetometer | magnetic field (µT, ±4 gauss) | `mag_ms` polling, 0 = disabled |
 | TCS34725 (v2 only) | colour/light, raw R, G, B, clear counts (gain 16, 154 ms integration) | `colour_ms` polling, 0 = disabled |
 | Joystick | up / down / left / right / middle; press / release / hold | on events |
@@ -46,6 +46,7 @@ error and every other flow keeps streaming.
 - Raspberry Pi with a [Sense HAT](https://www.raspberrypi.com/products/sense-hat/) (v1 or v2) seated on the GPIO header. Tested on a v2 (LSM9DS1 0x6a/0x1c, LPS25H 0x5c, HTS221 0x5f, TCS34725 0x29) with Debian 13 / kernel 6.18.
 - The user needs access to `/dev/i2c-1` (group `i2c`), the joystick event device (group `input`) and the LED framebuffer `/dev/fb*` (group `video`).
 - Raspberry Pi OS or other Debian-based Linux with `/dev/i2c-1` available.
+- **A fixed VPU core clock** for the higher ODRs: add `core_freq_min=500` to `/boot/firmware/config.txt` and reboot. The I²C clock is divided from the core clock. With the default `ondemand` governor the core drops to 300 MHz a few seconds after start, the bus slows to 60 %, and ODR 6 delivers ~500 instead of ~970 samples/s (measured on a Pi 4).
   Enable I²C via `sudo raspi-config` → *Interface Options* → *I2C*.
 - A C toolchain (`gcc`, `make`).
 - [SA Engine](https://www.streamanalyze.com/) installed, with
@@ -102,9 +103,10 @@ select sensehat:topic(v), value(v)
  where v in extract(first_n(
          sensehat:signal_flows(["accel","pressure","temp"]), 30));
 
--- All sensors: ODR 2 (59.5 Hz), 4096-item buffer, env every 1 s,
--- gyro on, mag every 50 ms, colour every 200 ms, joystick on.
-register_sensehat_pump_ex(2, 4096, 1000, 1, 50, 200, 1);
+-- All sensors: ODR 2 (59.5 Hz), 4096-item buffer, accel + gyro,
+-- pressure and humidity every 1 s, mag every 50 ms, colour every 200 ms,
+-- joystick on.
+register_sensehat_pump(2, 4096, 1, 1, 1000, 1000, 50, 200, 1);
 
 select sensehat:topic(v), value(v)
   from Timeval v
@@ -138,19 +140,40 @@ Raises `"sensehat: ODR must be 1-6"` if `odr` is out of range.
 Registering while a pump is running stops the running pump first, so
 re-running a setup script is safe.
 
-#### `register_sensehat_pump_ex(odr, bufsize, env_ms, enable_gyro, mag_ms, colour_ms, joystick) -> Charstring`
+#### `register_sensehat_pump(odr, bufsize, accel, gyro, pressure_ms, humidity_ms, mag_ms, colour_ms, joystick) -> Charstring`
 
-Like `register_sensehat_pump`, plus:
+The same function with every sensor named.
 
 | Argument | Meaning |
 | --- | --- |
-| `mag_ms` | Magnetometer polling interval in ms (0 = disabled). The sensor runs at 80 Hz. |
-| `colour_ms` | Colour sensor polling interval in ms (0 = disabled). One integration takes 154 ms. |
+| `odr`, `bufsize` | As above. |
+| `accel` | `1` = stream the accelerometer, `0` = off. |
+| `gyro` | `1` = stream the gyroscope, `0` = off. Needs `accel = 1` (the LSM9DS1 FIFO pairs them). With accel and gyro both off the IMU is not read at all. |
+| `pressure_ms` | LPS25H pressure + temperature interval in ms (0 = off). |
+| `humidity_ms` | HTS221 humidity + temperature interval in ms (0 = off). |
+| `mag_ms` | Magnetometer interval in ms (0 = off). The sensor runs at 80 Hz. |
+| `colour_ms` | Colour sensor interval in ms (0 = off). One integration takes 154 ms. |
 | `joystick` | `1` = stream joystick events, `0` = off. |
 
 ```sql
-register_sensehat_pump_ex(2, 4096, 1000, 1, 50, 200, 1);  -- mag 20 Hz, colour 5 Hz, joystick on
+register_sensehat_pump(2, 4096, 1, 1, 1000, 1000, 50, 200, 1);  -- mag 20 Hz, colour 5 Hz, joystick on
+register_sensehat_pump(6, 2048, 1, 0, 0, 0, 0, 0, 0);           -- accel only at ~970 Hz
 ```
+
+#### The I²C bus budget
+
+Each sample is its own I²C transaction, a register write plus a read of 4–8 bytes. At the Pi's default 100 kHz bus clock that is about 0.9 ms, so the bus serves roughly 1100 transactions per second. That figure was measured as 2 × 547 Hz with accel and gyro at ODR 6, with the core clock fixed. Both register functions add up what a request needs before starting the pump:
+- one transaction per accel sample and one per gyro sample (the ODR rate each);
+- one per pressure, humidity, mag and colour poll (1000 / interval each).
+
+If that exceeds the budget, 1050 per second at 100 kHz and scaled to the configured `i2c_arm_baudrate`, the call raises `"sensehat: request exceeds the I2C bus budget (lower odr, turn gyro off or poll slower)"`, with the needed transactions per second as the error value. It no longer silently delivers fewer samples. Examples at 100 kHz:
+
+| Request | Needs | |
+| --- | --- | --- |
+| accel at ODR 6 | 952/s | fits (~970 Hz measured) |
+| accel at ODR 6 + pressure, humidity 1 s + mag 50 ms + colour 200 ms | 979/s | fits |
+| accel + gyro at ODR 5 | 952/s | fits |
+| accel + gyro at ODR 6 | 1904/s | **error** |
 
 #### LED matrix functions
 
@@ -198,7 +221,7 @@ load_osql('sa.rpi-sensehat.osql');
 load_osql('sensehat-streams.osql');
 load_osql('sensehat-compass.osql');   -- needs sensehat-streams.osql
 load_osql('sensehat-display.osql');   -- loads the font and emoji files
-register_sensehat_pump_ex(2, 4096, 1000, 1, 50, 200, 1);
+register_sensehat_pump(2, 4096, 1, 1, 1000, 1000, 50, 200, 1);
 
 sensehat:show_message("Hello");
 sensehat:show_emoji("smile");
@@ -250,12 +273,12 @@ pieces combine (`sensehat:level_demo()`, `sensehat:joy_demo()`).
 
 | Topic | Payload | Rate |
 | --- | --- | --- |
-| `sensehat:accel` | `Timeval([ax, ay, az])` in g | IMU ODR (always on) |
-| `sensehat:gyro` | `Timeval([gx, gy, gz])` in dps | IMU ODR (if `enable_gyro = 1`) |
-| `sensehat:pressure` | `Timeval(hPa)` | every `env_ms` (if > 0) |
-| `sensehat:temp` | `Timeval(°C)` | every `env_ms` (if > 0) |
-| `sensehat:humidity` | `Timeval(%rH)` | every `env_ms` (if > 0) |
-| `sensehat:humidity_temp` | `Timeval(°C)` from the HTS221 | every `env_ms` (if > 0) |
+| `sensehat:accel` | `Timeval([ax, ay, az])` in g | IMU ODR (if `accel = 1`; always with the 4-argument register) |
+| `sensehat:gyro` | `Timeval([gx, gy, gz])` in dps | IMU ODR (if `gyro` / `enable_gyro = 1`) |
+| `sensehat:pressure` | `Timeval(hPa)` | every `pressure_ms` / `env_ms` (if > 0) |
+| `sensehat:temp` | `Timeval(°C)` | every `pressure_ms` / `env_ms` (if > 0) |
+| `sensehat:humidity` | `Timeval(%rH)` | every `humidity_ms` / `env_ms` (if > 0) |
+| `sensehat:humidity_temp` | `Timeval(°C)` from the HTS221 | every `humidity_ms` / `env_ms` (if > 0) |
 | `sensehat:mag` | `Timeval([mx, my, mz])` in µT, raw LSM9DS1-M frame, uncalibrated | every `mag_ms` (if > 0) |
 | `sensehat:colour` | `Timeval([r, g, b, c])` raw counts | every `colour_ms` (if > 0) |
 | `sensehat:joystick` | `Timeval([direction, action])`, e.g. `["up", "press"]` | on events (if `joystick = 1`) |
@@ -282,9 +305,9 @@ typed accessors above unpack them.
   (sensor reset delays, I²C config writes, FIFO settling). The tests
   measure several windows and average only the steady-state tail —
   see `tail_avg` in [test-sa.rpi-sensehat.osql](test-sa.rpi-sensehat.osql).
-- **I²C bandwidth.** At 952 Hz with both accel and gyro enabled, the
-  reader thread spends most of its time draining the FIFO over I²C.
-  Skipping gyro (`enable_gyro = 0`) roughly halves bus traffic.
+- **I²C bandwidth.** See "The I²C bus budget" above. Accel
+  at ODR 6 alone uses ~90 % of a 100 kHz bus. It holds ~970 Hz only with
+  the core clock fixed (`core_freq_min=500`, see Prerequisites).
 - **Sense HAT v1 and v2.** Both use the LSM9DS1, LPS25H and HTS221;
   the v2 adds the TCS34725 colour sensor.
 - **One driver at a time.** The pump reconfigures the sensors; don't run

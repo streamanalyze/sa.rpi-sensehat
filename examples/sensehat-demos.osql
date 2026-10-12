@@ -7,7 +7,7 @@
  *   load_osql('sensehat-streams.osql');
  *   load_osql('sensehat-display.osql');
  *   load_osql('examples/sensehat-demos.osql');
- *   register_sensehat_pump_ex(2, 4096, 1000, 0, 0, 0, 1);
+ *   register_sensehat_pump(2, 4096, 1, 0, 0, 0, 0, 0, 1);
  *   sensehat:level_demo();
  *
  * The level and joystick demos run until the query is stopped.
