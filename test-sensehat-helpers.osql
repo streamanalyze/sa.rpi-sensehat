@@ -1,0 +1,132 @@
+/*-*-sql-*-
+ * test-sensehat-helpers.osql — tests for the OSQL helper files
+ *
+ * Needs no Sense HAT and no extension: the stubs below stand in for the
+ * LED and flow functions of sa.rpi-sensehat.osql, so this also runs on a
+ * PC. Checks the font, emoji data, frame builders, motion helpers and the
+ * compass maths.
+ *
+ * Run with:
+ *   sa.engine -O test-sensehat-helpers.osql
+ */
+
+/* ---- Stubs for sa.rpi-sensehat.osql ---- */
+create function sensehat:led_pixels(Vector px) -> Integer as dim(px);
+create function sensehat:led_clear(Integer r, Integer g, Integer b) -> Integer as 1;
+create function sensehat:flow(Charstring f) -> Stream of Timeval
+  as subscribe("sensehat:" + f);
+create function sensehat:signal_flows(Vector of Charstring fs) -> Stream of Timeval
+  as subscribe:merge(fs);
+create function sensehat:topic(Timeval tv) -> Charstring as value(tv)[1];
+create function sensehat:xyz(Timeval tv) -> Vector of Real as value(tv)[2];
+create function sensehat:scalar(Timeval tv) -> Real as value(tv)[2];
+create function sensehat:rgbc(Timeval tv) -> Vector of Integer as value(tv)[2];
+create function sensehat:key(Timeval tv) -> Vector of Charstring as value(tv)[2];
+
+load_osql(file:current_folder() + "sensehat-streams.osql");
+load_osql(file:current_folder() + "sensehat-display.osql");
+load_osql(file:current_folder() + "sensehat-compass.osql");
+
+/* Number of lit (non-black) pixels in a frame. */
+create function test:lit(Vector frame) -> Integer
+  as count(select p from Vector p where p in frame and p != [0, 0, 0]);
+
+/* ================================================================
+ * Font
+ * ================================================================ */
+
+validate "font has 91 characters, each with a glyph"
+   check dim(sensehat:font_chars()) => 91
+   check count(select i from Integer i
+           where i in iota(1, 91)
+             and dim(sensehat:glyph_tbl(sensehat:font_chars()[i])) > 0) => 91;
+
+validate "unknown character shows as ?"
+   check sensehat:glyph("§") => sensehat:glyph_tbl("?");
+
+validate "text columns: 8 blank, glyph, 1 blank per letter, 8 blank"
+   check dim(sensehat:text_columns("")) => 16
+   check dim(sensehat:text_columns("AB"))
+         => 18 + dim(sensehat:glyph("A")) + dim(sensehat:glyph("B"))
+   check sensehat:text_columns("A")[9] => sensehat:glyph("A")[1];
+
+validate "character frame is centred and coloured"
+   check dim(sensehat:char_frame("I", [255, 0, 0])) => 64
+   check test:lit(sensehat:char_frame(" ", [255, 0, 0])) => 0
+   check test:lit(sensehat:char_frame("I", [255, 0, 0])) > 0 => true
+   check sensehat:show_char("A", [1, 2, 3]) => 64;
+
+/* ================================================================
+ * Dots and numbers
+ * ================================================================ */
+
+validate "dot frame lights one pixel at column x, row y"
+   check sensehat:dot_frame(7, 0, [1, 2, 3])[8] => [1, 2, 3]
+   check sensehat:dot_frame(0, 7, [1, 2, 3])[57] => [1, 2, 3]
+   check test:lit(sensehat:dot_frame(4, 4, [1, 2, 3])) => 1;
+
+validate "numbers: one digit uses the font, 0-99 clamped"
+   check sensehat:number_frame(5, [9, 9, 9]) => sensehat:char_frame("5", [9, 9, 9])
+   check sensehat:number_frame(123, [9, 9, 9]) => sensehat:number_frame(99, [9, 9, 9])
+   check sensehat:number_frame(-3, [9, 9, 9]) => sensehat:number_frame(0, [9, 9, 9])
+   check dim(sensehat:number_frame(42, [9, 9, 9])) => 64
+   check sensehat:show_number(42, [9, 9, 9]) => 64;
+
+/* ================================================================
+ * Emojis
+ * ================================================================ */
+
+validate "31 emojis of 8 rows x 8 palette letters"
+   check dim(sensehat:emoji_names()) => 31
+   check count(select n from Charstring n
+           where n in sensehat:emoji_names()
+             and dim(sensehat:emoji_tbl(n)) = 8) => 31
+   check count(select r from Charstring n, Charstring r
+           where n in sensehat:emoji_names()
+             and r in sensehat:emoji_tbl(n)
+             and dim(r) != 8) => 0;
+
+validate "every emoji letter is in the palette"
+   check count(select c from Charstring n, Charstring r, Integer i, Charstring c
+           where n in sensehat:emoji_names()
+             and r in sensehat:emoji_tbl(n)
+             and i in iota(1, 8)
+             and c = r[i]
+             and notany(sensehat:emoji_colour(c))) => 0;
+
+validate "emoji frames"
+   check dim(sensehat:emoji_frame(sensehat:emoji_rows("smile"))) => 64
+   check sensehat:emoji_rows("no such emoji") => sensehat:emoji_tbl("question")
+   check sensehat:show_emoji("heart") => 64;
+
+/* sa_logo: column 1 is lit in rows 1-5 (bits 0-4), column 8 in rows 4-8. */
+validate "emoji as one-colour columns"
+   check sensehat:emoji_columns("sa_logo")[1] => 31
+   check sensehat:emoji_columns("sa_logo")[8] => 248
+   check dim(sensehat:emoji_columns("sa_logo")) => 8;
+
+/* ================================================================
+ * Motion helpers
+ * ================================================================ */
+
+validate "motion helpers"
+   check sensehat:norm3([3.0, 4.0, 0.0]) => 5.0
+   check sensehat:window_mags([["accel", [0.0, 0.0, 1.0]], ["accel", [0.0, 3.0, 4.0]]])
+         => [1.0, 5.0]
+   check sensehat:motion_row("t", [1.0, 1.0]) => ["t", 2, 1.0, 1.0, 0.0];
+
+/* ================================================================
+ * Compass maths (board flat: accel [0, 0, 1])
+ * ================================================================ */
+
+validate "heading of a flat board"
+   check sensehat:heading_of([0.0, 0.0, 1.0], [-20.0, 0.0, -40.0]) => 0.0
+   check sensehat:heading_of([0.0, 0.0, 1.0], [0.0, -20.0, -40.0]) => 90.0
+   check sensehat:heading_of([0.0, 0.0, 1.0], [20.0, 0.0, -40.0]) => 180.0
+   check sensehat:heading_of([0.0, 0.0, 1.0], [0.0, 20.0, -40.0]) => 270.0;
+
+validate "mag offset is stored"
+   check sensehat:set_mag_offset([1.0, 2.0, 3.0]) => [1.0, 2.0, 3.0]
+   check sensehat:mag_offset() => [1.0, 2.0, 3.0];
+
+quit;

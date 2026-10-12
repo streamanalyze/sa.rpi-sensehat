@@ -1,0 +1,76 @@
+/*-*-sql-*-
+ * sensehat-demos.osql — small interactive demos for the Sense HAT
+ *
+ * Load from the plugin folder after the plugin and its helpers, then
+ * register the pump (accel for level_demo, joystick for joy_demo):
+ *   load_osql('sa.rpi-sensehat.osql');
+ *   load_osql('sensehat-streams.osql');
+ *   load_osql('sensehat-display.osql');
+ *   load_osql('examples/sensehat-demos.osql');
+ *   register_sensehat_pump_ex(2, 4096, 1000, 0, 0, 0, 1);
+ *   sensehat:level_demo();
+ *
+ * The level and joystick demos run until the query is stopped.
+ */
+
+/* Clamp an LED coordinate to 0-7. */
+create function sensehat:led_pos(Real v) -> Integer
+  as case when v < 0 then 0 when v > 7 then 7 else round(v) end;
+
+/* Level: a ball rolls to the low side of the board, ~20 Hz. Green when
+ * level, yellow when tilted, red at the edge. Rows: [ax, ay, column, row]. */
+create function sensehat:level_demo() -> Stream of Vector
+  as select Stream of [roundto(a[1], 2), roundto(a[2], 2), x, y,
+                       sensehat:show_dot(x, y, colour)]
+       from Vector of Real a, Integer x, Integer y, Vector colour
+      where a in sample_every(sensehat:accel(), 0.05)
+        and x = sensehat:led_pos(3.5 + 7.0 * a[1])
+        and y = sensehat:led_pos(3.5 + 7.0 * a[2])
+        and colour = case when x in (3, 4) and y in (3, 4) then [0, 255, 0]
+                          when x in (0, 7) or y in (0, 7) then [255, 0, 0]
+                          else [255, 160, 0] end;
+
+/* Dot colours for the joystick demo (a middle press cycles them). */
+create function sensehat:demo_palette(Integer i) -> Vector
+  as [[0, 255, 0], [0, 128, 255], [255, 0, 0], [255, 255, 0],
+      [255, 0, 255], [0, 255, 255], [255, 255, 255]][mod(i, 7) + 1];
+
+/* Joystick: move a dot with the joystick; a middle press changes its
+ * colour. Rows: [direction, column, row]. */
+create function sensehat:joy_demo() -> Stream of Vector
+  as { declare Integer x, Integer y, Integer c;
+       set x = 3; set y = 3; set c = 0;
+       sensehat:show_dot(x, y, sensehat:demo_palette(c));
+       for k in sensehat:joystick() {
+         case when k[2] = "release" then set c = c
+              when k[1] = "up"    and y > 0 then set y = y - 1
+              when k[1] = "down"  and y < 7 then set y = y + 1
+              when k[1] = "left"  and x > 0 then set x = x - 1
+              when k[1] = "right" and x < 7 then set x = x + 1
+              when k[1] = "middle" and k[2] = "press" then set c = c + 1
+         end;
+         sensehat:show_dot(x, y, sensehat:demo_palette(c));
+         yield [k[1], x, y];
+       }; };
+
+/* Every font character in turn, `secs` seconds each. Streams
+ * [number, character]; the matrix is cleared at the end. */
+create function sensehat:font_demo(Real secs) -> Stream of Vector
+  as { declare Charstring chars;
+       set chars = sensehat:font_chars();
+       for i in diota(secs, 1, dim(chars)) {
+         sensehat:show_char(chars[i], [255, 255, 255]);
+         yield [i, chars[i]];
+       };
+       sensehat:led_clear(0, 0, 0); };
+
+/* Every emoji in turn, `secs` seconds each. Streams [number, name]; the
+ * matrix is cleared at the end. */
+create function sensehat:emoji_demo(Real secs) -> Stream of Vector
+  as { declare Vector of Charstring names;
+       set names = sensehat:emoji_names();
+       for i in diota(secs, 1, dim(names)) {
+         sensehat:show_emoji(names[i]);
+         yield [i, names[i]];
+       };
+       sensehat:led_clear(0, 0, 0); };

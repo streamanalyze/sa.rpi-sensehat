@@ -1,0 +1,104 @@
+/*-*-sql-*-
+ * sensehat-streams.osql — typed sensor streams and recording
+ *
+ * Plain streams over the pump's flows (for queries and plots: a stream of
+ * numeric vectors plots as one line per element), a motion summary, and a
+ * recorder. Load sa.rpi-sensehat.osql first and register the pump:
+ *   load_osql('sa.rpi-sensehat.osql');
+ *   load_osql('sensehat-streams.osql');
+ *   register_sensehat_pump_ex(2, 4096, 1000, 1, 50, 200, 1);
+ *   sensehat:accel();
+ */
+
+/* ================================================================
+ * Sensor streams
+ * ================================================================ */
+
+/* Accelerometer [x, y, z] in g at the pump ODR. */
+create function sensehat:accel() -> Stream of Vector of Real
+  as select Stream of sensehat:xyz(v)
+       from Timeval v
+      where v in sensehat:flow("accel");
+
+/* Gyroscope [x, y, z] in degrees per second at the pump ODR (enable_gyro = 1). */
+create function sensehat:gyro() -> Stream of Vector of Real
+  as select Stream of sensehat:xyz(v)
+       from Timeval v
+      where v in sensehat:flow("gyro");
+
+/* Magnetometer [x, y, z] in µT, raw sensor frame including the board's
+ * hard-iron offset (mag_ms > 0). */
+create function sensehat:mag_raw() -> Stream of Vector of Real
+  as select Stream of sensehat:xyz(v)
+       from Timeval v
+      where v in sensehat:flow("mag");
+
+/* Colour sensor [r, g, b, clear] in raw counts (Sense HAT v2, colour_ms > 0). */
+create function sensehat:colour() -> Stream of Vector of Integer
+  as select Stream of sensehat:rgbc(v)
+       from Timeval v
+      where v in sensehat:flow("colour");
+
+/* Joystick events [direction, action], e.g. ["up", "press"] (joystick = 1). */
+create function sensehat:joystick() -> Stream of Vector of Charstring
+  as select Stream of sensehat:key(v)
+       from Timeval v
+      where v in sensehat:flow("joystick");
+
+/* Environment rows [flow, value]: pressure (hPa), temp (°C, LPS25H),
+ * humidity (%rH), every env_ms. */
+create function sensehat:env() -> Stream of Vector
+  as select Stream of [sensehat:topic(v), roundto(sensehat:scalar(v), 2)]
+       from Timeval v
+      where v in sensehat:signal_flows(["pressure", "temp", "humidity"]);
+
+/* ================================================================
+ * Motion summary
+ * ================================================================ */
+
+/* Magnitude of a 3-vector. */
+create function sensehat:norm3(Vector of Real a) -> Real
+  as sqrt(a[1]*a[1] + a[2]*a[2] + a[3]*a[3]);
+
+/* twinagg keeps the payloads but not the per-sample timestamps: a window's
+ * value() is a plain Vector of [flow, [x, y, z]] items. */
+create function sensehat:window_xyz(Vector item) -> Vector of Real as item[2];
+
+/* Accel magnitudes (g) of the items in one window. */
+create function sensehat:window_mags(Vector items) -> Vector of Real
+  as select Vector of sensehat:norm3(sensehat:window_xyz(p))
+       from Vector p
+      where p in items;
+
+create function sensehat:motion_row(Charstring t, Vector of Real m) -> Vector
+  as [t, dim(m), roundto(avg(m), 3), roundto(max(m), 3), roundto(stdev(m), 4)];
+
+/* Motion summary per tumbling window of `win` seconds:
+ * [local time, samples, avg |a|, max |a|, stdev |a|]. Stdev near 0 = still. */
+create function sensehat:motion(Real win) -> Stream of Vector
+  as select Stream of sensehat:motion_row(local_time(timestamp(tw)),
+                                          sensehat:window_mags(value(tw)))
+       from Timeval of Vector tw
+      where tw in twinagg(sensehat:flow("accel"), win, win);
+
+/* ================================================================
+ * Recording
+ * ================================================================ */
+
+/* Record flows (e.g. ["accel", "joystick"]) for `secs` seconds to the JSON
+ * file `file`, one {"sa_time": ..., "sa_value": [flow, payload]} per line;
+ * blocks until done and returns the file. Overwrites an existing file; the
+ * folder must exist. A new subscription first delivers the last cached item
+ * of each flow (possibly old), so items stamped before the start are dropped.
+ * json:file_stream(file) reads it back as Timeval([flow, payload]) items,
+ * the same shape as sensehat:signal_flows. */
+create function sensehat:record(Vector of Charstring flows, Real secs,
+                                Charstring file) -> Charstring
+  as { declare Real t0;
+       set t0 = rnow();
+       json:write_file(file,
+                       (select Stream of v
+                          from Timeval v
+                         where v in time_section(sensehat:signal_flows(flows), 0, secs)
+                           and real(timestamp(v)) >= t0));
+       return file; };

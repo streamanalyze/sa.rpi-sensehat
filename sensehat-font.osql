@@ -1,0 +1,140 @@
+/*-*-sql-*-
+ * sensehat-font.osql — 8-row bitmap font for the Sense HAT LED matrix
+ * (91 characters). Loaded by sensehat-display.osql.
+ *
+ * Generated from the font of the Raspberry Pi python-sense-hat library
+ * (sense_hat/sense_hat_text.png and sense_hat_text.txt) by rendering each
+ * character with SenseHat.show_letter() and reading the frame back, so the
+ * glyphs match the official look. Each glyph is a vector of columns, left
+ * to right; in each column bit y (value 2^y) is row y from the top. Blank
+ * columns are trimmed.
+ *
+ * The font data is derived from python-sense-hat
+ * (https://github.com/RPi-Distro/python-sense-hat):
+ *
+ *   Copyright (c) 2015 Raspberry Pi Foundation
+ *
+ *   Redistribution and use in source and binary forms, with or without
+ *   modification, are permitted provided that the following conditions
+ *   are met:
+ *   1. Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *   2. Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *   3. Neither the name of the University nor the names of its contributors
+ *      may be used to endorse or promote products derived from this software
+ *      without specific prior written permission.
+ *
+ *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ *   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ *   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE HOLDERS OR
+ *   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ *   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ *   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ *   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ *   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ *   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+create function sensehat:glyph_tbl(Charstring ch) -> Vector of Integer as stored;
+
+set sensehat:glyph_tbl(" ") = [0,0,0];
+set sensehat:glyph_tbl("+") = [16,16,124,16,16];
+set sensehat:glyph_tbl("-") = [16,16,16,16,16];
+set sensehat:glyph_tbl("*") = [40,16,124,16,40];
+set sensehat:glyph_tbl("/") = [64,32,16,8,4];
+set sensehat:glyph_tbl("!") = [190];
+set sensehat:glyph_tbl('"') = [14,0,14];
+set sensehat:glyph_tbl("#") = [40,254,40,254,40];
+set sensehat:glyph_tbl("$") = [72,84,254,84,36];
+set sensehat:glyph_tbl(">") = [130,68,40,16];
+set sensehat:glyph_tbl("<") = [16,40,68,130];
+set sensehat:glyph_tbl("0") = [124,162,146,138,124];
+set sensehat:glyph_tbl("1") = [132,254,128];
+set sensehat:glyph_tbl("2") = [132,194,162,146,140];
+set sensehat:glyph_tbl("3") = [66,130,138,150,98];
+set sensehat:glyph_tbl("4") = [48,40,36,254,32];
+set sensehat:glyph_tbl("5") = [78,138,138,138,114];
+set sensehat:glyph_tbl("6") = [120,148,146,146,96];
+set sensehat:glyph_tbl("7") = [2,2,242,10,6];
+set sensehat:glyph_tbl("8") = [108,146,146,146,108];
+set sensehat:glyph_tbl("9") = [12,146,146,82,60];
+set sensehat:glyph_tbl(".") = [192,192];
+set sensehat:glyph_tbl("=") = [40,40,40,40,40];
+set sensehat:glyph_tbl(")") = [130,68,56];
+set sensehat:glyph_tbl("(") = [56,68,130];
+set sensehat:glyph_tbl("A") = [252,18,18,18,252];
+set sensehat:glyph_tbl("B") = [254,146,146,146,108];
+set sensehat:glyph_tbl("C") = [124,130,130,130,68];
+set sensehat:glyph_tbl("D") = [254,130,130,68,56];
+set sensehat:glyph_tbl("E") = [254,146,146,146,130];
+set sensehat:glyph_tbl("F") = [254,18,18,18,2];
+set sensehat:glyph_tbl("G") = [124,130,146,146,244];
+set sensehat:glyph_tbl("H") = [254,16,16,16,254];
+set sensehat:glyph_tbl("I") = [130,254,130];
+set sensehat:glyph_tbl("J") = [64,128,130,126,2];
+set sensehat:glyph_tbl("K") = [254,16,40,68,130];
+set sensehat:glyph_tbl("L") = [254,128,128,128,128];
+set sensehat:glyph_tbl("M") = [254,4,24,4,254];
+set sensehat:glyph_tbl("N") = [254,8,16,32,254];
+set sensehat:glyph_tbl("O") = [124,130,130,130,124];
+set sensehat:glyph_tbl("P") = [254,18,18,18,12];
+set sensehat:glyph_tbl("Q") = [124,130,162,66,188];
+set sensehat:glyph_tbl("R") = [254,18,50,82,140];
+set sensehat:glyph_tbl("S") = [140,146,146,146,98];
+set sensehat:glyph_tbl("T") = [2,2,254,2,2];
+set sensehat:glyph_tbl("U") = [126,128,128,128,126];
+set sensehat:glyph_tbl("V") = [62,64,128,64,62];
+set sensehat:glyph_tbl("W") = [254,64,48,64,254];
+set sensehat:glyph_tbl("X") = [198,40,16,40,198];
+set sensehat:glyph_tbl("Y") = [6,8,240,8,6];
+set sensehat:glyph_tbl("Z") = [194,162,146,138,134];
+set sensehat:glyph_tbl("a") = [64,168,168,168,240];
+set sensehat:glyph_tbl("b") = [126,144,136,136,112];
+set sensehat:glyph_tbl("c") = [112,136,136,136,64];
+set sensehat:glyph_tbl("d") = [112,136,136,144,254];
+set sensehat:glyph_tbl("e") = [112,168,168,168,48];
+set sensehat:glyph_tbl("f") = [16,252,18,4];
+set sensehat:glyph_tbl("g") = [16,168,168,168,120];
+set sensehat:glyph_tbl("h") = [254,16,8,8,240];
+set sensehat:glyph_tbl("i") = [136,250,128];
+set sensehat:glyph_tbl("j") = [64,128,128,122];
+set sensehat:glyph_tbl("k") = [254,32,80,136];
+set sensehat:glyph_tbl("l") = [130,254,128];
+set sensehat:glyph_tbl("m") = [248,8,240,8,240];
+set sensehat:glyph_tbl("n") = [248,16,8,8,240];
+set sensehat:glyph_tbl("o") = [112,136,136,136,112];
+set sensehat:glyph_tbl("p") = [248,40,40,40,16];
+set sensehat:glyph_tbl("q") = [16,40,40,40,248];
+set sensehat:glyph_tbl("r") = [248,16,8,8];
+set sensehat:glyph_tbl("s") = [144,168,168,168,72];
+set sensehat:glyph_tbl("t") = [8,124,136,64];
+set sensehat:glyph_tbl("u") = [120,128,128,64,248];
+set sensehat:glyph_tbl("v") = [56,64,128,64,56];
+set sensehat:glyph_tbl("w") = [120,128,96,128,120];
+set sensehat:glyph_tbl("x") = [136,72,112,144,136];
+set sensehat:glyph_tbl("y") = [136,144,96,32,24];
+set sensehat:glyph_tbl("z") = [136,200,168,152,136];
+set sensehat:glyph_tbl("?") = [4,2,162,18,12];
+set sensehat:glyph_tbl(",") = [160,96];
+set sensehat:glyph_tbl(";") = [172,108];
+set sensehat:glyph_tbl(":") = [108,108];
+set sensehat:glyph_tbl("|") = [254];
+set sensehat:glyph_tbl("@") = [100,146,242,130,124];
+set sensehat:glyph_tbl("%") = [70,38,16,200,196];
+set sensehat:glyph_tbl("[") = [254,130,130];
+set sensehat:glyph_tbl("&") = [108,146,170,68,160];
+set sensehat:glyph_tbl("_") = [128,128,128,128,128];
+set sensehat:glyph_tbl("'") = [10,6];
+set sensehat:glyph_tbl("]") = [130,130,254];
+set sensehat:glyph_tbl("\\") = [4,8,16,32,64];
+set sensehat:glyph_tbl("~") = [16,8,24,16,8];
+
+/* All font characters in the font's own order (as in sense_hat_text.txt).
+ * Built from pieces because the set contains both quote characters. */
+create function sensehat:font_chars() -> Charstring
+  as " +-*/!" || '"' || "#$><0123456789.=)(ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+     || "abcdefghijklmnopqrstuvwxyz?,;:|@%[&_" || "'" || "]\\~";

@@ -33,6 +33,12 @@ error and every other flow keeps streaming.
 | [sa.rpi-sensehat.osql](sa.rpi-sensehat.osql) | OSQL bindings: stream functions, payload accessors |
 | [test-sa.rpi-sensehat.osql](test-sa.rpi-sensehat.osql) | Validation tests (v1 and v2): error handling, per-flow checks, multi-ODR rate validation, LED matrix |
 | [test-sa.rpi-sensehat-v2.osql](test-sa.rpi-sensehat-v2.osql) | Validation tests for v2-only hardware (colour sensor) |
+| [sensehat-streams.osql](sensehat-streams.osql) | Optional helpers: typed sensor streams, motion summary, recorder |
+| [sensehat-compass.osql](sensehat-compass.osql) | Optional helpers: magnetometer calibration, tilt-compensated heading |
+| [sensehat-display.osql](sensehat-display.osql) | Optional helpers: scrolling text, characters, numbers, emojis on the LED matrix |
+| [sensehat-font.osql](sensehat-font.osql), [sensehat-emoji.osql](sensehat-emoji.osql) | Data for the display helpers: 91-character font (from python-sense-hat, BSD-3-Clause), 31 colour emojis |
+| [examples/sensehat-demos.osql](examples/sensehat-demos.osql) | Demos: tilt level, joystick dot, font and emoji slideshows |
+| [test-sensehat-helpers.osql](test-sensehat-helpers.osql) | Tests for the helper files (no Sense HAT needed) |
 | [Makefile](Makefile) | Build, install, and test targets |
 
 ## Prerequisites
@@ -70,6 +76,7 @@ sample-rate accuracy at multiple ODR settings.
 ```sh
 make test                 # runs test-sa.rpi-sensehat.osql via sa.engine -O
 make test-v2              # Sense HAT v2 only: colour sensor tests
+make test-helpers         # OSQL helper files; no Sense HAT needed
 ```
 
 The LED tests briefly change the display, and the joystick test only
@@ -181,6 +188,64 @@ Tears down the running pump and reader thread so
 | `sensehat:key(tv)` | Joystick payload `[direction, action]`. |
 | `sensehat:accel_mag(tv)` | Accelerometer magnitude in g. |
 
+### Optional OSQL helper files
+
+Higher-level functions in separate files. Load `sa.rpi-sensehat.osql`
+first, then the files you need, from the plugin folder:
+
+```sql
+load_osql('sa.rpi-sensehat.osql');
+load_osql('sensehat-streams.osql');
+load_osql('sensehat-compass.osql');   -- needs sensehat-streams.osql
+load_osql('sensehat-display.osql');   -- loads the font and emoji files
+register_sensehat_pump_ex(2, 4096, 1000, 1, 50, 200, 1);
+
+sensehat:show_message("Hello");
+sensehat:show_emoji("smile");
+first_n(sensehat:env(), 3);
+```
+
+**`sensehat-streams.osql`**
+
+| Function | Purpose |
+| --- | --- |
+| `sensehat:accel()`, `sensehat:gyro()`, `sensehat:mag_raw()` | Streams of `[x, y, z]` (g, dps, µT). A stream of numeric vectors plots as one line per element. |
+| `sensehat:colour()` | Stream of `[r, g, b, clear]` raw counts. |
+| `sensehat:joystick()` | Stream of `[direction, action]`. |
+| `sensehat:env()` | Stream of `["pressure", hPa]`, `["temp", °C]`, `["humidity", %rH]`. |
+| `sensehat:motion(win)` | Per tumbling window of `win` s: `[local time, samples, avg \|a\|, max \|a\|, stdev \|a\|]` (stdev near 0 = still). |
+| `sensehat:record(flows, secs, file)` | Record flows for `secs` s to a JSON file, one `{"sa_time", "sa_value": [flow, payload]}` per line; `json:file_stream(file)` reads it back. Items cached from before the start are dropped. |
+
+**`sensehat-compass.osql`**
+
+| Function | Purpose |
+| --- | --- |
+| `sensehat:mag_calibrate(secs)` | Hard-iron calibration: rotate the board through all orientations for `secs` s; stores the offset (per-axis midpoint of min and max) and returns `[offset, range]`. |
+| `sensehat:mag()` | Magnetometer `[x, y, z]` in µT with the offset removed. |
+| `sensehat:mag_offset()`, `sensehat:set_mag_offset(v)` | Read or restore the stored offset (e.g. saved with `json:stringify`). |
+| `sensehat:heading()` | Tilt-compensated compass heading in degrees, ~10 Hz. |
+| `sensehat:heading_of(a, m)` | Heading from one accel and one calibrated mag vector. |
+
+**`sensehat-display.osql`**
+
+The `*_frame` functions build a 64-pixel frame; the `show_*` functions
+write it to the matrix.
+
+| Function | Purpose |
+| --- | --- |
+| `sensehat:show_message(text)` | Scroll text once in white (python-sense-hat font and padding); blocks until done. |
+| `sensehat:scroll_text(text, rgb, secs)` | Scroll text in a colour, `secs` per column; streams the frame number. |
+| `sensehat:show_char(ch, rgb)` / `char_frame` | One centred character. |
+| `sensehat:show_number(n, rgb)` / `number_frame` | 0-99: one font digit, or two compact 3x5 digits. |
+| `sensehat:show_emoji(name)` / `emoji_frame` | One of 31 colour emojis; `sensehat:emoji_names()` lists them. |
+| `sensehat:logo_message(emoji, text, rgb, hold, secs)` | Show an emoji for `hold` s, then scroll it off followed by text. |
+| `sensehat:show_dot(x, y, rgb)` / `dot_frame`, `sensehat:led_off()` | One dot; all off. |
+| `sensehat:text_columns(text)`, `sensehat:text_frame(cols, k, fg, bg)` | Building blocks for custom scrolling. |
+
+Emojis are 8 rows of palette letters in `sensehat-emoji.osql`, easy to
+edit by eye. The demos in `examples/sensehat-demos.osql` show how the
+pieces combine (`sensehat:level_demo()`, `sensehat:joy_demo()`).
+
 ### Flow topics
 
 | Topic | Payload | Rate |
@@ -237,3 +302,8 @@ typed accessors above unpack them.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+The font data in [sensehat-font.osql](sensehat-font.osql) is derived from
+[python-sense-hat](https://github.com/RPi-Distro/python-sense-hat)
+(Copyright (c) 2015 Raspberry Pi Foundation, BSD-3-Clause); its notice
+is in the file header.

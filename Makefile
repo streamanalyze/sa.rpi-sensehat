@@ -34,7 +34,11 @@ test: install
 test-v2: install
 	$(SA_ENGINE_HOME)/bin/sa.engine -O test-sa.rpi-sensehat-v2.osql
 
+# OSQL helper files; needs no Sense HAT (runs on any machine with sa.engine).
+test-helpers:
+	$(SA_ENGINE_HOME)/bin/sa.engine -O test-sensehat-helpers.osql
+
 clean:
 	rm -f rpi-sensehat.so
 
-.PHONY: clean install test test-v2
+.PHONY: clean install test test-v2 test-helpers

@@ -1,0 +1,182 @@
+/*-*-sql-*-
+ * sensehat-display.osql — text, digits and emojis on the Sense HAT LED matrix
+ *
+ * Builds on the LED functions of sa.rpi-sensehat.osql, so load that first:
+ *   load_osql('sa.rpi-sensehat.osql');
+ *   load_osql('sensehat-display.osql');
+ *   sensehat:show_message("Hello");
+ *
+ * The font (sensehat-font.osql, from python-sense-hat) and the emojis
+ * (sensehat-emoji.osql) are loaded from this file's folder.
+ *
+ * A frame is a vector of 64 [r, g, b] pixels, row-major (index = y*8 + x).
+ * The *_frame functions only build frames; the show_* functions write them
+ * to the matrix with sensehat:led_pixels.
+ */
+
+load_osql(file:current_folder() + "sensehat-font.osql");
+load_osql(file:current_folder() + "sensehat-emoji.osql");
+
+/* ================================================================
+ * Basics
+ * ================================================================ */
+
+/* Turn all pixels off. */
+create function sensehat:led_off() -> Integer as sensehat:led_clear(0, 0, 0);
+
+/* A frame that is black except for one dot at column x, row y. */
+create function sensehat:dot_frame(Integer x, Integer y, Vector rgb) -> Vector
+  as select Vector of case when i = y * 8 + x then rgb else [0, 0, 0] end
+       from Integer i
+      where i in iota(0, 63)
+      order by i;
+
+/* Show one dot at column x, row y; all other pixels off. */
+create function sensehat:show_dot(Integer x, Integer y, Vector rgb) -> Integer
+  as sensehat:led_pixels(sensehat:dot_frame(x, y, rgb));
+
+/* ================================================================
+ * Text
+ * ================================================================ */
+
+/* Glyph columns of one character; unknown characters show as "?". */
+create function sensehat:glyph(Charstring ch) -> Vector of Integer
+  as coalesce(sensehat:glyph_tbl(ch), sensehat:glyph_tbl("?"));
+
+/* All columns of a message, padded like python-sense-hat: 8 blank columns
+ * before, one blank column after each letter, then 8 blank columns so the
+ * text scrolls fully off. */
+create function sensehat:text_columns(Charstring text) -> Vector of Integer
+  as { declare Vector of Integer cols, Integer i;
+       set cols = zeros(8);
+       set i = 1;
+       while i <= dim(text) do
+         set cols = concat(concat(cols, sensehat:glyph(text[i])), [0]);
+         set i = i + 1;
+       end while;
+       return concat(cols, zeros(8)); };
+
+/* The frame showing columns k+1 .. k+8 of `cols`; bit y of a column lights
+ * row y in colour fg, other pixels get colour bg. */
+create function sensehat:text_frame(Vector of Integer cols, Integer k,
+                                    Vector fg, Vector bg) -> Vector
+  as select Vector of case when mod(r_shift(cols[k + mod(i, 8) + 1], r_shift(i, 3)), 2) = 1
+                           then fg else bg end
+       from Integer i
+      where i in iota(0, 63)
+      order by i;
+
+/* Scroll `text` right to left in colour fg, `speed` seconds per column.
+ * Streams the frame number; the matrix is cleared at the end. */
+create function sensehat:scroll_text(Charstring text, Vector fg, Real speed)
+                                    -> Stream of Integer
+  as { declare Vector of Integer cols;
+       set cols = sensehat:text_columns(text);
+       for k in diota(speed, 0, dim(cols) - 9) {
+         sensehat:led_pixels(sensehat:text_frame(cols, k, fg, [0, 0, 0]));
+         yield k;
+       };
+       sensehat:led_clear(0, 0, 0); };
+
+/* Scroll a message once in white and block until done; returns the number
+ * of frames shown. */
+create function sensehat:show_message(Charstring text) -> Integer
+  as count(extract(sensehat:scroll_text(text, [255, 255, 255], 0.08)));
+
+/* The 8 columns of one character, centred. */
+create function sensehat:char_columns(Charstring ch) -> Vector of Integer
+  as { declare Vector of Integer g, Integer x0;
+       set g = sensehat:glyph(ch);
+       set x0 = r_shift(8 - dim(g), 1);
+       return concat(concat(zeros(x0), g), zeros(8 - x0 - dim(g))); };
+
+/* The frame of one character, centred, in colour fg. */
+create function sensehat:char_frame(Charstring ch, Vector fg) -> Vector
+  as sensehat:text_frame(sensehat:char_columns(ch), 0, fg, [0, 0, 0]);
+
+/* Show one character, centred, in colour fg. */
+create function sensehat:show_char(Charstring ch, Vector fg) -> Integer
+  as sensehat:led_pixels(sensehat:char_frame(ch, fg));
+
+/* ================================================================
+ * Numbers 0-99
+ * ================================================================ */
+
+/* Compact 3x5 digits (columns, rows 2-6) for two-digit numbers. */
+create function sensehat:digit3(Integer d) -> Vector of Integer
+  as [[124, 68, 124], [72, 124, 64], [116, 84, 92], [84, 84, 124], [28, 16, 124],
+      [92, 84, 116], [124, 84, 116], [4, 4, 124], [124, 84, 124], [92, 84, 124]][d + 1];
+
+create function sensehat:as_ivec(Object o) -> Vector of Integer as o;
+
+/* The frame of n (clamped to 0-99): one font digit, or two compact digits. */
+create function sensehat:number_frame(Integer n, Vector rgb) -> Vector
+  as { declare Integer m, Vector f;
+       set m = case when n > 99 then 99 when n < 0 then 0 else n end;
+       case when m < 10 then set f = sensehat:char_frame(stringify(m), rgb)
+            else set f = sensehat:text_frame(
+                   sensehat:as_ivec(concat(concat(concat([0],
+                                       sensehat:digit3(round((m - mod(m, 10)) / 10))), [0]),
+                                   sensehat:digit3(mod(m, 10)))),
+                   0, rgb, [0, 0, 0])
+       end;
+       return f; };
+
+/* Show n (clamped to 0-99) in colour rgb. */
+create function sensehat:show_number(Integer n, Vector rgb) -> Integer
+  as sensehat:led_pixels(sensehat:number_frame(n, rgb));
+
+/* ================================================================
+ * Emojis (names: sensehat:emoji_names())
+ * ================================================================ */
+
+/* The frame of 8 rows of palette letters (unknown letters are off). */
+create function sensehat:emoji_frame(Vector of Charstring rows) -> Vector
+  as select Vector of coalesce(sensehat:emoji_colour(rows[r_shift(i, 3) + 1][mod(i, 8) + 1]),
+                               [0, 0, 0])
+       from Integer i
+      where i in iota(0, 63)
+      order by i;
+
+/* Emoji rows by name; unknown names give the "question" emoji. */
+create function sensehat:emoji_rows(Charstring name) -> Vector of Charstring
+  as coalesce(sensehat:emoji_tbl(name), sensehat:emoji_tbl("question"));
+
+/* Show an emoji by name. */
+create function sensehat:show_emoji(Charstring name) -> Integer
+  as sensehat:led_pixels(sensehat:emoji_frame(sensehat:emoji_rows(name)));
+
+/* An emoji as 8 one-colour columns (bit y = row y lit), for mixing with text. */
+create function sensehat:emoji_columns(Charstring name) -> Vector of Integer
+  as { declare Vector of Charstring rows, Vector of Integer cols,
+               Integer x, Integer y, Integer c;
+       set rows = sensehat:emoji_rows(name);
+       set cols = [];
+       set x = 1;
+       while x <= 8 do
+         set c = 0;
+         set y = 1;
+         while y <= 8 do
+           case when rows[y][x] != "." then set c = c + l_shift(1, y - 1) end;
+           set y = y + 1;
+         end while;
+         set cols = concat(cols, [c]);
+         set x = x + 1;
+       end while;
+       return cols; };
+
+/* Show emoji `logo` in one colour (fg) for `hold` seconds, then scroll it
+ * off to the left followed by `text`, `speed` seconds per column. Streams
+ * the frame number; the matrix is cleared at the end. */
+create function sensehat:logo_message(Charstring logo, Charstring text, Vector fg,
+                                      Real hold, Real speed) -> Stream of Integer
+  as { declare Vector of Integer cols;
+       set cols = concat(concat(sensehat:emoji_columns(logo), [0, 0]),
+                         skip(sensehat:text_columns(text), 8));
+       sensehat:led_pixels(sensehat:text_frame(cols, 0, fg, [0, 0, 0]));
+       sleep(hold);
+       for k in diota(speed, 1, dim(cols) - 9) {
+         sensehat:led_pixels(sensehat:text_frame(cols, k, fg, [0, 0, 0]));
+         yield k;
+       };
+       sensehat:led_clear(0, 0, 0); };
