@@ -31,7 +31,8 @@ error and every other flow keeps streaming.
 | --- | --- |
 | [sa.rpi-sensehat.c](sa.rpi-sensehat.c) | C extension: I²C drivers, reader thread, multi-flow datapump, foreign functions |
 | [sa.rpi-sensehat.osql](sa.rpi-sensehat.osql) | OSQL bindings: stream functions, payload accessors |
-| [test-sa.rpi-sensehat.osql](test-sa.rpi-sensehat.osql) | Validation tests: error handling, per-flow checks, multi-ODR rate validation |
+| [test-sa.rpi-sensehat.osql](test-sa.rpi-sensehat.osql) | Validation tests (v1 and v2): error handling, per-flow checks, multi-ODR rate validation, LED matrix |
+| [test-sa.rpi-sensehat-v2.osql](test-sa.rpi-sensehat-v2.osql) | Validation tests for v2-only hardware (colour sensor) |
 | [Makefile](Makefile) | Build, install, and test targets |
 
 ## Prerequisites
@@ -68,7 +69,11 @@ sample-rate accuracy at multiple ODR settings.
 
 ```sh
 make test                 # runs test-sa.rpi-sensehat.osql via sa.engine -O
+make test-v2              # Sense HAT v2 only: colour sensor tests
 ```
+
+The LED tests briefly change the display, and the joystick test only
+checks that the flow can be subscribed (presses need a human).
 
 ## Quick start
 
@@ -89,6 +94,19 @@ select sensehat:topic(v), value(v)
   from Timeval v
  where v in extract(first_n(
          sensehat:signal_flows(["accel","pressure","temp"]), 30));
+
+-- All sensors: ODR 2 (59.5 Hz), 4096-item buffer, env every 1 s,
+-- gyro on, mag every 50 ms, colour every 200 ms, joystick on.
+register_sensehat_pump_ex(2, 4096, 1000, 1, 50, 200, 1);
+
+select sensehat:topic(v), value(v)
+  from Timeval v
+ where v in extract(first_n(
+         sensehat:signal_flows(["mag","humidity","colour"]), 20));
+
+-- Light the top-left pixel red, then clear the matrix:
+sensehat:led_pixel(0, 0, 255, 0, 0);
+sensehat:led_clear(0, 0, 0);
 ```
 
 ## API reference
@@ -153,7 +171,10 @@ Tears down the running pump and reader thread so
 | --- | --- |
 | `sensehat:flow(name)` | Subscribe to a single flow (`"accel"`, `"gyro"`, `"pressure"`, `"temp"`, `"humidity"`, `"humidity_temp"`, `"mag"`, `"colour"`, `"joystick"`). |
 | `sensehat:signal_flows(names)` | Subscribe to a vector of flows merged into one stream. |
+| `sensehat:flows_after(names, since)` | Like `signal_flows`, but drops items stamped before `since` (e.g. left over from a previous pump). |
+| `sensehat:flow_topics(names)` | The topic names (`"sensehat:" + name`) for a vector of flow names. |
 | `sensehat:topic(tv)` | Flow name on a sample. |
+| `sensehat:payload(tv)` | Raw payload of a sample (untyped). |
 | `sensehat:xyz(tv)` | 3-vector payload (accel/gyro/mag). |
 | `sensehat:scalar(tv)` | Scalar payload (pressure/temp/humidity/humidity_temp). |
 | `sensehat:rgbc(tv)` | Colour payload `[r, g, b, clear]` (raw counts). |

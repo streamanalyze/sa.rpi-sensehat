@@ -30,7 +30,11 @@ install: rpi-sensehat.so
 test: install
 	$(SA_ENGINE_HOME)/bin/sa.engine -O test-sa.rpi-sensehat.osql
 
+# Sense HAT v2 only (colour sensor).
+test-v2: install
+	$(SA_ENGINE_HOME)/bin/sa.engine -O test-sa.rpi-sensehat-v2.osql
+
 clean:
 	rm -f rpi-sensehat.so
 
-.PHONY: clean install test
+.PHONY: clean install test test-v2

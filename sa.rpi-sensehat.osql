@@ -93,7 +93,7 @@ create function sensehat:flow_topics(Vector of Charstring flows)
       where f in flows;
 
 /* Subscribe to multiple sensehat flows merged into one stream.
- * flows is a vector of one or more of: "accel", "gyro", "pressure", "temp".
+ * flows is a vector of one or more flow names (see sensehat:flow).
  *
  * Example:
  *   sensehat:signal_flows(["accel","temp"])
@@ -124,16 +124,17 @@ create function sensehat:flows_after(Vector of Charstring flows, Timeval since)
  * Each item is Timeval of [flow_name, payload].
  * ================================================================ */
 
-/* Flow name string ("accel", "gyro", "pressure", "temp"). */
+/* Flow name string ("accel", "gyro", "pressure", "temp", "humidity",
+ * "humidity_temp", "mag", "colour", "joystick"). */
 create function sensehat:topic(Timeval tv) -> Charstring as value(tv)[1];
 
 /* Raw payload (second element of the wrapper vector). */
 create function sensehat:payload(Timeval tv) -> Object as value(tv)[2];
 
-/* 3-vector payload (accel or gyro items). */
+/* 3-vector payload (accel, gyro or mag items). */
 create function sensehat:xyz(Timeval tv) -> Vector of Real as value(tv)[2];
 
-/* Scalar payload (pressure or temp items). */
+/* Scalar payload (pressure, temp, humidity or humidity_temp items). */
 create function sensehat:scalar(Timeval tv) -> Real as value(tv)[2];
 
 /* Acceleration magnitude (g) — for accel items. */

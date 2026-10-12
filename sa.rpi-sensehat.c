@@ -145,6 +145,8 @@ extern ohandle a_timestamp(time_t seconds, int useconds, ohandle o);
 #define TCS_CDATAL       0x14
 
 /* ---- Joystick ---- */
+/* Device path on a Pi 4 (BCM2711 I2C at fe804000); on other boards
+   joy_open() falls back to scanning /dev/input/event* for JOY_NAME. */
 #define JOY_BY_PATH \
     "/dev/input/by-path/platform-fe804000.i2c-platform-fe804000.i2c:sensehat@46:joystick-event"
 #define JOY_NAME    "Raspberry Pi Sense HAT Joystick"
@@ -861,7 +863,6 @@ static void sensehat_pump_stopper(sa_datapump *pump) {
         a_sleep(0.01);
 }
 
-
 /* Tear down the running pump (reader thread + datapump consumer).
    Returns 1 if a pump was stopped, 0 if nothing was running. */
 static int stop_running_pump(void) {
@@ -1045,12 +1046,13 @@ static int led_component(ohandle h, int *out) {
     return (*out < 0 || *out > 255) ? -1 : 0;
 }
 
-/* Read r,g,b components 0-255 from three handles into RGB565. */
+/* Read r,g,b components 0-255 from three handles into RGB565.
+   Returns 0, or the position (1-3) of the first invalid component. */
 static int led_rgb(ohandle r_oh, ohandle g_oh, ohandle b_oh, uint16_t *out) {
     int r, g, b;
-    if (led_component(r_oh, &r) < 0 || led_component(g_oh, &g) < 0 ||
-        led_component(b_oh, &b) < 0)
-        return -1;
+    if (led_component(r_oh, &r) < 0) return 1;
+    if (led_component(g_oh, &g) < 0) return 2;
+    if (led_component(b_oh, &b) < 0) return 3;
     *out = rgb565(r, g, b);
     return 0;
 }
@@ -1058,10 +1060,11 @@ static int led_rgb(ohandle r_oh, ohandle g_oh, ohandle b_oh, uint16_t *out) {
 /* sensehat:led_clear(Integer r, Integer g, Integer b) -> Integer */
 static ohandle sensehat_led_clearBBBF(a_callcontext cxt) {
     uint16_t c;
+    int bad;
     LED_OPEN_OR_THROW(cxt);
-    if (led_rgb(a_arg(cxt, 1), a_arg(cxt, 2), a_arg(cxt, 3), &c) < 0)
+    if ((bad = led_rgb(a_arg(cxt, 1), a_arg(cxt, 2), a_arg(cxt, 3), &c)))
         return a_throw_errormsg(a_env(cxt), "sensehat: colour must be 0-255",
-                                a_arg(cxt, 1));
+                                a_arg(cxt, bad));
     for (int i = 0; i < 64; i++) g_led[i] = c;
     const char *err = led_flush();
     if (err) return a_throw_errormsg(a_env(cxt), (char *)err, nil);
@@ -1073,7 +1076,7 @@ static ohandle sensehat_led_clearBBBF(a_callcontext cxt) {
 /* sensehat:led_pixel(Integer x, Integer y, Integer r, Integer g, Integer b)
      -> Integer      (x = column, y = row, both 0-7) */
 static ohandle sensehat_led_pixelBBBBBF(a_callcontext cxt) {
-    int x, y;
+    int x, y, bad;
     uint16_t c;
     LED_OPEN_OR_THROW(cxt);
     IntoInteger32(a_arg(cxt, 1), x, a_env(cxt));
@@ -1081,9 +1084,9 @@ static ohandle sensehat_led_pixelBBBBBF(a_callcontext cxt) {
     if (x < 0 || x > 7 || y < 0 || y > 7)
         return a_throw_errormsg(a_env(cxt), "sensehat: x and y must be 0-7",
                                 a_arg(cxt, x < 0 || x > 7 ? 1 : 2));
-    if (led_rgb(a_arg(cxt, 3), a_arg(cxt, 4), a_arg(cxt, 5), &c) < 0)
+    if ((bad = led_rgb(a_arg(cxt, 3), a_arg(cxt, 4), a_arg(cxt, 5), &c)))
         return a_throw_errormsg(a_env(cxt), "sensehat: colour must be 0-255",
-                                a_arg(cxt, 3));
+                                a_arg(cxt, 2 + bad));
     g_led[y * 8 + x] = c;
     const char *err = led_flush();
     if (err) return a_throw_errormsg(a_env(cxt), (char *)err, nil);
@@ -1104,7 +1107,7 @@ static ohandle sensehat_led_pixelsBF(a_callcontext cxt) {
     for (int i = 0; i < 64; i++) {
         ohandle p = a_elt(px, i);
         if (a_arraysize(p) != 3 ||
-            led_rgb(a_elt(p, 0), a_elt(p, 1), a_elt(p, 2), &frame[i]) < 0)
+            led_rgb(a_elt(p, 0), a_elt(p, 1), a_elt(p, 2), &frame[i]))
             return a_throw_errormsg(a_env(cxt),
                                     "sensehat: each pixel must be [r,g,b] in 0-255", p);
     }

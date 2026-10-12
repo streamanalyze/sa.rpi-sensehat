@@ -1,7 +1,10 @@
 /*-*-sql-*-
  * test-sa.rpi-sensehat.osql — validation test for the sensehat datapump extension
  *
- * Tests multi-flow datapump, stop/restart, and ODR cycling.
+ * Tests multi-flow datapump, stop/restart, ODR cycling, re-register while
+ * running, register_sensehat_pump_ex (humidity, mag, joystick) and the
+ * LED matrix. Works on Sense HAT v1 and v2; the v2-only colour sensor is
+ * tested in test-sa.rpi-sensehat-v2.osql.
  *
  * Assumptions:
  *   - The Sense HAT is connected and /dev/i2c-1 is accessible.
@@ -239,18 +242,14 @@ validate "mag magnitude plausible (uT)"
 validate "mag rate (~20 Hz at mag_ms 50)"
    check count(extract(first_n(time_section(sensehat:flow("mag"), 0, 1), 100))) > 12 => true;
 
-/* Colour exists on Sense HAT v2 only (TCS34725). */
-validate "colour payload is [r,g,b,c] of non-negative counts"
-   check select dim(c) = 4 and c[1] >= 0 and c[2] >= 0 and c[3] >= 0 and c[4] >= 0
-           from Vector of Integer c
-          where c = sensehat:rgbc(first(first_n(sensehat:flow("colour"), 1))) => true;
-
+/* Colour (TCS34725) exists on Sense HAT v2 only; it is tested in
+   test-sa.rpi-sensehat-v2.osql. On a v1 HAT only the colour flow errors. */
 validate "merged new flows carry their topics"
    check (select distinct sensehat:topic(v)
             from Timeval v
            where v in extract(first_n(
-                   sensehat:signal_flows(["mag","colour","humidity"]), 40)))
-         => values "mag", "colour", "humidity";
+                   sensehat:signal_flows(["mag","humidity"]), 40)))
+         => values "mag", "humidity";
 
 /* The joystick needs a human; only check that subscribing is possible. */
 validate "joystick flow can be subscribed"
@@ -286,6 +285,8 @@ validate "led_low_light toggles"
 
 validate "led argument errors"
    check sensehat:led_clear(300, 0, 0) => ["*error*", "sensehat: colour must be 0-255", 300]
+   check sensehat:led_clear(0, 0, 999) => ["*error*", "sensehat: colour must be 0-255", 999]
+   check sensehat:led_pixel(0, 0, 1, -1, 1) => ["*error*", "sensehat: colour must be 0-255", -1]
    check sensehat:led_pixel(8, 0, 1, 1, 1) => ["*error*", "sensehat: x and y must be 0-7", 8]
    check sensehat:led_pixels([[1, 2, 3]]) => ["*error*", "sensehat: led_pixels needs 64 [r,g,b] vectors", [[1, 2, 3]]];
 
