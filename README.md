@@ -223,7 +223,7 @@ first_n(sensehat:env(), 3);
 | `sensehat:mag_calibrate(secs)` | Hard-iron calibration: rotate the board through all orientations for `secs` s; stores the offset (per-axis midpoint of min and max) and returns `[offset, range]`. |
 | `sensehat:mag()` | Magnetometer `[x, y, z]` in µT with the offset removed. |
 | `sensehat:mag_offset()`, `sensehat:set_mag_offset(v)` | Read or restore the stored offset (e.g. saved with `json:stringify`). |
-| `sensehat:heading()` | Tilt-compensated compass heading in degrees, ~10 Hz. |
+| `sensehat:heading()` | Tilt-compensated compass heading in degrees, ~10 Hz: 0 = the accelerometer +x axis (the Pi's USB/Ethernet end) points to magnetic north, rising clockwise. Add the local declination for true north. |
 | `sensehat:heading_of(a, m)` | Heading from one accel and one calibrated mag vector. |
 
 **`sensehat-display.osql`**
@@ -290,11 +290,15 @@ typed accessors above unpack them.
 - **One driver at a time.** The pump reconfigures the sensors; don't run
   the Python `sense_hat` / RTIMULib stack against the same HAT at the
   same time.
-- **Magnetometer frame and offset.** `sensehat:mag` is the raw LSM9DS1
-  magnetometer frame (RTIMULib flips x and z to align it with the
-  accelerometer). Readings include the board's hard-iron offset, which
-  can be several hundred µT; calibrate (per-axis min/max while rotating
-  the board) before computing a heading.
+- **Magnetometer frame and offset.** The `mag` flow is the raw LSM9DS1
+  magnetometer frame. Relative to the raw accelerometer frame its x axis
+  is flipped (measured: over a tumble recording, `[-x, y, z]` is the only
+  axis mapping that keeps the angle between field and gravity constant);
+  `sensehat:heading_of` applies this. Readings include the board's
+  hard-iron offset, which changed between ~40 and ~330 µT on our board
+  depending on what was nearby. Calibrate with `sensehat:mag_calibrate`
+  where the board will be used. At high latitudes the horizontal field is
+  only ~13-20 µT, so expect ±15-20° from the heading.
 - **Joystick and the console.** The joystick is also a keyboard
   (arrow keys + Enter) for the Linux console; reading it here does not
   grab it exclusively.

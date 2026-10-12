@@ -50,14 +50,21 @@ create function sensehat:mag_calibrate(Real secs) -> Vector
        return [roundto(sensehat:mag_offset(), 1), roundto(hi - lo, 1)]; };
 
 /* Tilt-compensated heading in degrees (0-360) from accel a [g] and
- * calibrated magnetometer m [µT]. The magnetometer is first rotated into
- * the accelerometer frame (x and z flipped, as RTIMULib does for the
- * LSM9DS1), then the ST AN4248 equations are applied. */
+ * calibrated magnetometer m [µT]; 0 = the accelerometer's +x axis (the
+ * Pi's USB/Ethernet end) points to magnetic north, rising clockwise.
+ * The magnetometer is first mapped into the accelerometer frame by
+ * flipping x. That mapping was measured on a Sense HAT v2: over a tumble
+ * recording it is the only one of the 48 axis permutations/sign flips
+ * that keeps the angle between field and gravity constant. Then the ST
+ * AN4248 equations are applied.
+ * Accuracy depends on the calibration: the horizontal field is only
+ * ~13-20 µT at high latitudes, so a few µT of offset error moves the
+ * heading by tens of degrees. Calibrate where the board will be used. */
 create function sensehat:heading_of(Vector of Real a, Vector of Real m) -> Real
   as select roundto(case when h < 0 then h + 360.0 else h end, 1)
        from Real mx, Real my, Real mz, Real roll, Real pitch,
             Real bx, Real by, Real h
-      where mx = -m[1] and my = m[2] and mz = -m[3]
+      where mx = -m[1] and my = m[2] and mz = m[3]
         and roll  = atan2(a[2], a[3])
         and pitch = atan2(-a[1], a[2] * sin(roll) + a[3] * cos(roll))
         and bx = mx * cos(pitch) + my * sin(pitch) * sin(roll)
@@ -67,7 +74,10 @@ create function sensehat:heading_of(Vector of Real a, Vector of Real m) -> Real
 
 create function sensehat:as_rvec(Object o) -> Vector of Real as o;
 
-/* Compass heading stream, ~10 Hz. Calibrate first (sensehat:mag_calibrate). */
+/* Compass heading stream, ~10 Hz, relative to MAGNETIC north (add the local
+ * declination for true north; phone compasses usually show true north).
+ * Calibrate first (sensehat:mag_calibrate), where the board will be used:
+ * laptops, monitors, cables and metal furniture bend the weak field. */
 create function sensehat:heading() -> Stream of Real
   as select Stream of sensehat:heading_of(sensehat:as_rvec(p[1]), sensehat:as_rvec(p[2]))
        from Vector p

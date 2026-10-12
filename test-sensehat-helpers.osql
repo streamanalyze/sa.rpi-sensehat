@@ -125,6 +125,12 @@ validate "heading of a flat board"
    check sensehat:heading_of([0.0, 0.0, 1.0], [20.0, 0.0, -40.0]) => 180.0
    check sensehat:heading_of([0.0, 0.0, 1.0], [0.0, 20.0, -40.0]) => 270.0;
 
+/* Board pointing north with its nose (+x) raised 30 degrees, in a field of
+   13 uT north and 35 uT down: the tilt compensation must still give 0
+   (flipping the mag z axis would give 180). */
+validate "heading of a tilted board"
+   check sensehat:heading_of([0.5, 0.0, 0.8660254], [6.2417, 0.0, -36.8109]) => 0.0;
+
 validate "mag offset is stored"
    check sensehat:set_mag_offset([1.0, 2.0, 3.0]) => [1.0, 2.0, 3.0]
    check sensehat:mag_offset() => [1.0, 2.0, 3.0];
