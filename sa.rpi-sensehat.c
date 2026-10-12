@@ -1040,10 +1040,13 @@ static const char *led_flush(void) {
 
 /* One colour component: an Integer (or Real, truncated) in 0-255. */
 static int led_component(ohandle h, int *out) {
-    if (integerp(h))   *out = getinteger32(h);
-    else if (realp(h)) *out = (int)getreal(h);
+    double v;
+    if (integerp(h))   v = (double)getinteger(h);
+    else if (realp(h)) v = getreal(h);
     else return -1;
-    return (*out < 0 || *out > 255) ? -1 : 0;
+    if (v < 0 || v >= 256) return -1;   /* range-check before narrowing */
+    *out = (int)v;
+    return 0;
 }
 
 /* Read r,g,b components 0-255 from three handles into RGB565.
@@ -1106,7 +1109,7 @@ static ohandle sensehat_led_pixelsBF(a_callcontext cxt) {
     uint16_t frame[64];
     for (int i = 0; i < 64; i++) {
         ohandle p = a_elt(px, i);
-        if (a_arraysize(p) != 3 ||
+        if (!arrayp(p) || a_arraysize(p) != 3 ||
             led_rgb(a_elt(p, 0), a_elt(p, 1), a_elt(p, 2), &frame[i]))
             return a_throw_errormsg(a_env(cxt),
                                     "sensehat: each pixel must be [r,g,b] in 0-255", p);

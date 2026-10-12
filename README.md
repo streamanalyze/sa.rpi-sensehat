@@ -130,7 +130,7 @@ thread starts lazily on the first `subscribe`. Returns the pump name
 | --- | --- |
 | `odr` | LSM9DS1 output data rate, **1–6** (see table below). |
 | `bufsize` | Circular-buffer capacity in items. 1024–4096 is typical. |
-| `env_ms` | Pressure/temperature polling interval in ms. **0 disables** the LPS25H entirely. |
+| `env_ms` | Pressure/temperature/humidity polling interval in ms. **0 disables** the LPS25H and HTS221 entirely. |
 | `enable_gyro` | `0` = accel only (saves I²C bandwidth); `1` = accel + gyro. |
 
 Raises `"sensehat: ODR must be 1-6"` if `odr` is out of range.

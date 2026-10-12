@@ -36,7 +36,7 @@ load_extension("rpi-sensehat");
  * odr         — LSM9DS1 output data rate (1-6):
  *               1=14.9Hz 2=59.5Hz 3=119Hz 4=238Hz 5=476Hz 6=952Hz
  * bufsize     — circular-buffer capacity in items
- * env_ms      — pressure/temp polling interval in ms (0 = disabled)
+ * env_ms      — pressure/temp/humidity polling interval in ms (0 = disabled)
  * enable_gyro — 0 = accel only (saves I2C bandwidth),
  *               1 = accel + gyro
  */

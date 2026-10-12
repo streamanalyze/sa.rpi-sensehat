@@ -288,7 +288,11 @@ validate "led argument errors"
    check sensehat:led_clear(0, 0, 999) => ["*error*", "sensehat: colour must be 0-255", 999]
    check sensehat:led_pixel(0, 0, 1, -1, 1) => ["*error*", "sensehat: colour must be 0-255", -1]
    check sensehat:led_pixel(8, 0, 1, 1, 1) => ["*error*", "sensehat: x and y must be 0-7", 8]
-   check sensehat:led_pixels([[1, 2, 3]]) => ["*error*", "sensehat: led_pixels needs 64 [r,g,b] vectors", [[1, 2, 3]]];
+   check sensehat:led_pixels([[1, 2, 3]]) => ["*error*", "sensehat: led_pixels needs 64 [r,g,b] vectors", [[1, 2, 3]]]
+   check sensehat:led_pixels((select Vector of i from Integer i
+                               where i in iota(1, 64) order by i))
+         => ["*error*", "sensehat: each pixel must be [r,g,b] in 0-255", 1]
+   check sensehat:led_clear(4294967301, 0, 0) => ["*error*", "sensehat: colour must be 0-255", 4294967301];
 
 sensehat:led_clear(0, 0, 0);
 quit;

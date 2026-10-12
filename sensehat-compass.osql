@@ -35,13 +35,16 @@ create function sensehat:mag() -> Stream of Vector of Real
  *   write_file(json:stringify(sensehat:mag_offset()), file)
  * and restore it with sensehat:set_mag_offset(json:unstringify(read_file(file))). */
 create function sensehat:mag_calibrate(Real secs) -> Vector
-  as { declare Vector of Real lo, Vector of Real hi;
+  as { declare Vector of Real lo, Vector of Real hi, Integer n;
        set lo = [1e9, 1e9, 1e9];
        set hi = [-1e9, -1e9, -1e9];
+       set n = 0;
        for m in time_section(sensehat:mag_raw(), 0, secs) {
          set lo = [min([lo[1], m[1]]), min([lo[2], m[2]]), min([lo[3], m[3]])];
          set hi = [max([hi[1], m[1]]), max([hi[2], m[2]]), max([hi[3], m[3]])];
+         set n = n + 1;
        };
+       case when n = 0 then error("sensehat:mag_calibrate: no mag samples (mag_ms = 0?)") end;
        sensehat:set_mag_offset([(lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2,
                                 (lo[3] + hi[3]) / 2]);
        return [roundto(sensehat:mag_offset(), 1), roundto(hi - lo, 1)]; };
