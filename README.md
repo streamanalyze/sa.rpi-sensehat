@@ -205,6 +205,7 @@ Tears down the running pump and reader thread so
 | `sensehat:flow_topics(names)` | The topic names (`"sensehat:" + name`) for a vector of flow names. |
 | `sensehat:topic(tv)` | Flow name on a sample. |
 | `sensehat:payload(tv)` | Raw payload of a sample (untyped). |
+| `sensehat:consumers(name)` | Queries currently attached to a flow (from the engine's `flows()`). |
 | `sensehat:xyz(tv)` | 3-vector payload (accel/gyro/mag). |
 | `sensehat:scalar(tv)` | Scalar payload (pressure/temp/humidity/humidity_temp). |
 | `sensehat:rgbc(tv)` | Colour payload `[r, g, b, clear]` (raw counts). |
@@ -232,9 +233,10 @@ first_n(sensehat:env(), 3);
 
 | Function | Purpose |
 | --- | --- |
-| `sensehat:accel()`, `sensehat:gyro()`, `sensehat:mag_raw()` | Streams of `[x, y, z]` (g, dps, µT). A stream of numeric vectors plots as one line per element. |
+| `sensehat:accel()`, `sensehat:gyro()`, `sensehat:mag_raw()` | Streams of `[x, y, z]` (g, dps, µT), starting at `now()` (no stale first item). A stream of numeric vectors plots as one line per element. |
 | `sensehat:colour()` | Stream of `[r, g, b, clear]` raw counts. |
 | `sensehat:joystick()` | Stream of `[direction, action]`. |
+| `sensehat:joystick_presses()` | Stream of directions, presses only (no release or auto-repeat). |
 | `sensehat:env()` | Stream of `["pressure", hPa]`, `["temp", °C]`, `["humidity", %rH]`. |
 | `sensehat:motion(win)` | Per tumbling window of `win` s: `[local time, samples, avg \|a\|, max \|a\|, stdev \|a\|]` (stdev near 0 = still). |
 | `sensehat:record(flows, secs, file)` | Record flows for `secs` s to a JSON file, one `{"sa_time", "sa_value": [flow, payload]}` per line; `json:file_stream(file)` reads it back. Items cached from before the start are dropped. |
@@ -308,6 +310,26 @@ typed accessors above unpack them.
 - **I²C bandwidth.** See "The I²C bus budget" above. Accel
   at ODR 6 alone uses ~90 % of a 100 kHz bus. It holds ~970 Hz only with
   the core clock fixed (`core_freq_min=500`, see Prerequisites).
+- **Consumers.** Every running query on a flow is a consumer of the pump,
+  and each one has a queue of 1000 items. When one consumer falls more
+  than 1000 items behind, for example a query that subscribed but never
+  started reading, the pump's pushes overflow and **every** consumer
+  loses samples (sa.engine#5181). Bound interactive queries
+  (`first_n`, `timeout`). Subscribe inside the query that reads the
+  stream. Don't publish a sensor stream from a detached background query
+  (sa.engine#4938). `sensehat:consumers(flow)` shows how many are
+  attached. `sensehat:stop()` doesn't detach running queries; ending
+  them or restarting the engine does.
+- **Stale first item.** A new subscription first gets the last item the
+  pump pushed, possibly hours old. The helper streams in
+  `sensehat-streams.osql` start at `now()` (`sensehat:flows_after`), and
+  so should any query that measures "from now".
+- **Clock.** Items are stamped with `CLOCK_REALTIME` when read. If the
+  clock steps after the engine starts (NTP), `flows_after(…, now())` can
+  drop everything. Start the engine after `time-sync.target`, with
+  `systemd-time-wait-sync` enabled. JSON recordings (`json:write_file`)
+  keep stamps only to whole milliseconds, so at ODR 6 (~1 ms apart)
+  neighbouring samples can share a stamp.
 - **Sense HAT v1 and v2.** Both use the LSM9DS1, LPS25H and HTS221;
   the v2 adds the TCS34725 colour sensor.
 - **One driver at a time.** The pump reconfigures the sensors; don't run

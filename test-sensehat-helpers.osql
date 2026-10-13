@@ -16,7 +16,11 @@ create function sensehat:led_clear(Integer r, Integer g, Integer b) -> Integer a
 create function sensehat:flow(Charstring f) -> Stream of Timeval
   as subscribe("sensehat:" + f);
 create function sensehat:signal_flows(Vector of Charstring fs) -> Stream of Timeval
-  as subscribe:merge(fs);
+  as subscribe:merge((select Vector of "sensehat:" + f from Charstring f where f in fs));
+create function sensehat:flows_after(Vector of Charstring fs, Timeval since)
+  -> Stream of Timeval
+  as select Stream of v from Timeval v
+      where v in sensehat:signal_flows(fs) and timestamp(v) >= since;
 create function sensehat:topic(Timeval tv) -> Charstring as value(tv)[1];
 create function sensehat:xyz(Timeval tv) -> Vector of Real as value(tv)[2];
 create function sensehat:scalar(Timeval tv) -> Real as value(tv)[2];

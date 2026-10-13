@@ -275,6 +275,17 @@ validate "mag magnitude plausible (uT)"
 validate "mag rate (~20 Hz at mag_ms 50)"
    check count(extract(first_n(time_section(sensehat:flow("mag"), 0, 1), 100))) > 12 => true;
 
+/* A running query counts as a consumer; an ended one is detached on the
+   next push (hence the short sleep with the pump running). */
+validate "consumers: one while a query runs"
+   check (select sensehat:consumers("accel")
+            from Timeval v
+           where v in first_n(sensehat:flow("accel"), 1)) => 1;
+sleep(0.3);
+validate "consumers: none after the query ended"
+   check sensehat:consumers("accel") => 0
+   check sensehat:consumers("no_such_flow") => 0;
+
 /* Colour (TCS34725) exists on Sense HAT v2 only; it is tested in
    test-sa.rpi-sensehat-v2.osql. On a v1 HAT only the colour flow errors. */
 validate "merged new flows carry their topics"

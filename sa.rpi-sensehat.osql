@@ -133,6 +133,19 @@ create function sensehat:flows_after(Vector of Charstring flows, Timeval since)
       where v in sensehat:signal_flows(flows)
         and timestamp(v) >= since;
 
+/* Consumers currently attached to a flow, from the engine's flows():
+ * 0 when none (or the flow has not been subscribed yet). A consumer that
+ * stops reading while attached makes the pump lose samples for everyone
+ * once it is 1000 items behind (see "Consumers" in the README), so a
+ * count that stays above what you expect points at a stuck query.
+ * Ended queries are detached on the next push, so read it with the pump
+ * running. */
+create function sensehat:consumers(Charstring flow_name) -> Integer
+  as coalesce(sum(select cast(r["consumers"] as Integer)
+                    from Record r
+                   where r in flows()
+                     and r["name"] = "sensehat:" + flow_name), 0);
+
 /* ================================================================
  * Payload accessors
  *

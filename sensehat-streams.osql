@@ -12,45 +12,57 @@
 
 /* ================================================================
  * Sensor streams
+ *
+ * A new subscription first delivers the last item the pump pushed, which
+ * can be seconds or hours old. Every stream here starts at now(): items
+ * stamped before the query started are dropped (sensehat:flows_after).
  * ================================================================ */
 
 /* Accelerometer [x, y, z] in g at the pump ODR. */
 create function sensehat:accel() -> Stream of Vector of Real
   as select Stream of sensehat:xyz(v)
        from Timeval v
-      where v in sensehat:flow("accel");
+      where v in sensehat:flows_after(["accel"], now());
 
 /* Gyroscope [x, y, z] in degrees per second at the pump ODR (enable_gyro = 1). */
 create function sensehat:gyro() -> Stream of Vector of Real
   as select Stream of sensehat:xyz(v)
        from Timeval v
-      where v in sensehat:flow("gyro");
+      where v in sensehat:flows_after(["gyro"], now());
 
 /* Magnetometer [x, y, z] in µT, raw sensor frame including the board's
  * hard-iron offset (mag_ms > 0). */
 create function sensehat:mag_raw() -> Stream of Vector of Real
   as select Stream of sensehat:xyz(v)
        from Timeval v
-      where v in sensehat:flow("mag");
+      where v in sensehat:flows_after(["mag"], now());
 
 /* Colour sensor [r, g, b, clear] in raw counts (Sense HAT v2, colour_ms > 0). */
 create function sensehat:colour() -> Stream of Vector of Integer
   as select Stream of sensehat:rgbc(v)
        from Timeval v
-      where v in sensehat:flow("colour");
+      where v in sensehat:flows_after(["colour"], now());
 
 /* Joystick events [direction, action], e.g. ["up", "press"] (joystick = 1). */
 create function sensehat:joystick() -> Stream of Vector of Charstring
   as select Stream of sensehat:key(v)
        from Timeval v
-      where v in sensehat:flow("joystick");
+      where v in sensehat:flows_after(["joystick"], now());
+
+/* Joystick presses only, as the direction: "up", "down", "left", "right",
+ * "middle". Releases and the driver's auto-repeat ("hold") are left out. */
+create function sensehat:joystick_presses() -> Stream of Charstring
+  as select Stream of k[1]
+       from Vector of Charstring k
+      where k in sensehat:joystick()
+        and k[2] = "press";
 
 /* Environment rows [flow, value]: pressure (hPa), temp (°C, LPS25H),
- * humidity (%rH), every env_ms. */
+ * humidity (%rH), every pressure_ms / humidity_ms. */
 create function sensehat:env() -> Stream of Vector
   as select Stream of [sensehat:topic(v), roundto(sensehat:scalar(v), 2)]
        from Timeval v
-      where v in sensehat:signal_flows(["pressure", "temp", "humidity"]);
+      where v in sensehat:flows_after(["pressure", "temp", "humidity"], now());
 
 /* ================================================================
  * Motion summary
@@ -79,7 +91,7 @@ create function sensehat:motion(Real win) -> Stream of Vector
   as select Stream of sensehat:motion_row(local_time(timestamp(tw)),
                                           sensehat:window_mags(value(tw)))
        from Timeval of Vector tw
-      where tw in twinagg(sensehat:flow("accel"), win, win);
+      where tw in twinagg(sensehat:flows_after(["accel"], now()), win, win);
 
 /* ================================================================
  * Recording
