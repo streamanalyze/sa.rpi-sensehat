@@ -1,16 +1,30 @@
 /*
- * sa.rpi-sensehat.c — SA Engine datapump extension for Raspberry Pi Sense HAT v1
+ * sa.rpi-sensehat.c — SA Engine datapump extension for Raspberry Pi Sense HAT
+ *                     (v1 and v2)
  *
  * Uses the sa_datapump infrastructure with per-signal flow routing.
- * A background thread reads the LSM9DS1 IMU FIFO and (optionally) the
- * LPS25H barometer, pushing tagged items into a circular buffer.
+ * A single background thread reads the LSM9DS1 IMU FIFO and polls the
+ * other sensors (LPS25H barometer, HTS221 humidity, LSM9DS1 magnetometer,
+ * TCS34725 colour sensor, joystick), pushing tagged items into one
+ * circular buffer (the datapump is single-producer).
  * SA Engine consumers select desired signals via subscribe:merge.
  *
  * Flow names (topics under the "sensehat" pump):
- *   sensehat:accel    — Timeval([ax,ay,az])         at IMU ODR (always on)
- *   sensehat:gyro     — Timeval([gx,gy,gz])         at IMU ODR (if enabled)
- *   sensehat:pressure — Timeval(hPa)                at env_ms  (if > 0)
- *   sensehat:temp     — Timeval(°C)                 at env_ms  (if > 0)
+ *   sensehat:accel         — Timeval([ax,ay,az]) g       at IMU ODR (if enabled)
+ *   sensehat:gyro          — Timeval([gx,gy,gz]) dps     at IMU ODR (if enabled)
+ *   sensehat:pressure      — Timeval(hPa)                at pressure_ms (if > 0)
+ *   sensehat:temp          — Timeval(°C, LPS25H)         at pressure_ms (if > 0)
+ *   sensehat:humidity      — Timeval(%rH)                at humidity_ms (if > 0)
+ *   sensehat:humidity_temp — Timeval(°C, HTS221)         at humidity_ms (if > 0)
+ *   sensehat:mag           — Timeval([mx,my,mz]) µT      at mag_ms  (if > 0)
+ *   sensehat:colour        — Timeval([r,g,b,c]) counts   at colour_ms (if > 0, v2 only)
+ *   sensehat:joystick      — Timeval([dir, action])      on events  (if enabled)
+ *       dir    = "up" | "down" | "left" | "right" | "middle"
+ *       action = "press" | "release" | "hold"
+ *
+ * Humidity, magnetometer, colour and joystick are optional: if a device
+ * is missing (e.g. no colour sensor on a v1 HAT) only that flow gets an
+ * error; the rest of the pump keeps running.
  *
  * Exposed OSQL foreign functions (see sa.rpi-sensehat.osql for full bindings):
  *
@@ -20,14 +34,40 @@
  *
  *     odr         — LSM9DS1 output data rate 1-6 (see table below)
  *     bufsize     — circular-buffer capacity in items
- *     env_ms      — pressure/temp polling interval in ms (0 = disabled)
+ *     env_ms      — pressure/temp/humidity polling interval in ms (0 = disabled)
  *     enable_gyro — 0 = accel only, 1 = accel + gyro
+ *
+ *     (env_ms drives both pressure/temp and humidity here.)
+ *
+ *   register_sensehat_pump(Integer odr, Integer bufsize,
+ *                          Integer accel, Integer gyro,
+ *                          Integer pressure_ms, Integer humidity_ms,
+ *                          Integer mag_ms, Integer colour_ms,
+ *                          Integer joystick)
+ *     -> Charstring
+ *
+ *     Every sensor named: accel / gyro / joystick on (1) or off (0),
+ *     polling intervals in ms (0 = off). gyro needs accel.
+ *
+ *   Both check the I2C bus budget first: a request that needs more I2C
+ *   transactions per second than the bus can serve (e.g. accel + gyro at
+ *   ODR 6) raises an error instead of silently delivering fewer samples.
+ *   Registering while a pump is running first stops the running pump.
  *
  *   sensehat:stop() -> Integer
  *
  *     Tears down the running pump so register_sensehat_pump can be
  *     called again with new settings.  Returns 1 if a pump was
  *     stopped, 0 if nothing was running.
+ *
+ *   LED matrix (8x8, RGB565 framebuffer "RPi-Sense FB"; independent of
+ *   the pump):
+ *     sensehat:led_clear(Integer r, Integer g, Integer b) -> Integer
+ *     sensehat:led_pixel(Integer x, Integer y,
+ *                        Integer r, Integer g, Integer b) -> Integer
+ *     sensehat:led_pixels(Vector px) -> Integer   (64 x [r,g,b], row-major)
+ *     sensehat:led_get_pixels() -> Vector         (64 x [r,g,b])
+ *     sensehat:led_low_light(Integer on) -> Integer
  *
  * sa.rpi-sensehat.osql additionally defines pure-OSQL helpers on top of
  * these, notably sensehat:signal_flows(Vector of Charstring) which
@@ -51,6 +91,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/i2c-dev.h>
+#include <linux/input.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -62,8 +103,11 @@
 extern ohandle a_timestamp(time_t seconds, int useconds, ohandle o);
 
 /* ---- I2C addresses ---- */
-#define LSM_AG_ADDR 0x6A   /* LSM9DS1 accel/gyro */
-#define LPS_ADDR    0x5C   /* LPS25H pressure    */
+#define LSM_AG_ADDR 0x6A   /* LSM9DS1 accel/gyro   */
+#define LSM_M_ADDR  0x1C   /* LSM9DS1 magnetometer */
+#define LPS_ADDR    0x5C   /* LPS25H pressure      */
+#define HTS_ADDR    0x5F   /* HTS221 humidity      */
+#define TCS_ADDR    0x29   /* TCS34725 colour (v2) */
 
 /* ---- LSM9DS1 registers ---- */
 #define LSM_WHO_AM_I     0x0F
@@ -84,9 +128,41 @@ extern ohandle a_timestamp(time_t seconds, int useconds, ohandle o);
 #define LPS_CTRL_REG2    0x21
 #define LPS_PRESS_OUT_XL 0x28
 
+/* ---- LSM9DS1 magnetometer registers ---- */
+#define MAG_WHO_AM_I     0x0F           /* = 0x3D */
+#define MAG_CTRL_REG1    0x20
+#define MAG_CTRL_REG2    0x21
+#define MAG_CTRL_REG3    0x22
+#define MAG_CTRL_REG4    0x23
+#define MAG_OUT_X_L      0x28
+
+/* ---- HTS221 registers ---- */
+#define HTS_WHO_AM_I     0x0F           /* = 0xBC */
+#define HTS_CTRL_REG1    0x20
+#define HTS_HUMIDITY_OUT 0x28
+#define HTS_CALIB_0      0x30
+
+/* ---- TCS34725 registers (always OR'ed with a command byte) ---- */
+#define TCS_CMD          0x80           /* command, repeated byte  */
+#define TCS_CMD_AUTOINC  0xA0           /* command, auto-increment */
+#define TCS_ENABLE       0x00
+#define TCS_ATIME        0x01
+#define TCS_CONTROL      0x0F
+#define TCS_ID           0x12           /* = 0x44 (TCS34725) / 0x4D (TCS34727) */
+#define TCS_CDATAL       0x14
+
+/* ---- Joystick ---- */
+/* Device path on a Pi 4 (BCM2711 I2C at fe804000); on other boards
+   joy_open() falls back to scanning /dev/input/event* for JOY_NAME. */
+#define JOY_BY_PATH \
+    "/dev/input/by-path/platform-fe804000.i2c-platform-fe804000.i2c:sensehat@46:joystick-event"
+#define JOY_NAME    "Raspberry Pi Sense HAT Joystick"
+#define JOY_POLL_S  0.01                /* check for key events every 10 ms */
+
 /* ---- Conversion factors ---- */
 #define ACCEL_SCALE (0.000244)          /* ±8g: 0.244 mg/LSB per LSM9DS1 datasheet */
 #define GYRO_SCALE  (2000.0 / 32768.0) /* ±2000 dps */
+#define MAG_SCALE   (0.014)            /* ±4 gauss: 0.14 mgauss/LSB = 0.014 µT/LSB */
 
 /* ---- Accelerometer calibration loaded from /etc/RTIMULib.ini ---- */
 /* 6-position gravity calibration; corrected = 2*(raw-min)/(max-min) - 1  */
@@ -139,19 +215,36 @@ typedef enum {
     FLOW_ACCEL = 0,
     FLOW_GYRO,
     FLOW_PRESSURE,
-    FLOW_TEMP
+    FLOW_TEMP,
+    FLOW_HUMIDITY,
+    FLOW_HUMIDITY_TEMP,
+    FLOW_MAG,
+    FLOW_COLOUR,
+    FLOW_JOYSTICK
 } sensehat_flow_t;
 
-static const char *flow_names[] = {"accel", "gyro", "pressure", "temp"};
+static const char *flow_names[] = {"accel", "gyro", "pressure", "temp",
+                                   "humidity", "humidity_temp", "mag",
+                                   "colour", "joystick"};
 
 typedef struct {
     struct timespec tspec;
     sensehat_flow_t flow;
     union {
-        struct { double x, y, z; } vec3;   /* accel or gyro  */
-        double scalar;                      /* pressure or temp */
+        struct { double x, y, z; } vec3;   /* accel, gyro or mag          */
+        double scalar;                      /* pressure, temp, humidity    */
+        uint16_t rgbc[4];                   /* colour: r, g, b, clear      */
+        struct { int code, value; } key;    /* joystick: key code, 0/1/2   */
     } d;
 } sensehat_item_t;
+
+/* HTS221 factory calibration, read once at init */
+typedef struct {
+    double h0_rh, h1_rh;      /* %rH at the two calibration points    */
+    double h0_out, h1_out;    /* raw humidity output at those points  */
+    double t0_c, t1_c;        /* °C at the two calibration points     */
+    double t0_out, t1_out;    /* raw temperature output at those      */
+} hts_cal_t;
 
 /* ================================================================
  * Pump context — carried in pump->context
@@ -161,9 +254,17 @@ typedef struct {
     volatile int running;
     volatile int done;
     int  odr_bits;
+    int  accel_enabled;    /* 0 with gyro 0 = IMU off             */
     int  gyro_enabled;
-    int  env_ms;           /* 0 = pressure/temp disabled */
+    int  pressure_ms;      /* 0 = pressure/temp (LPS25H) disabled */
+    int  humidity_ms;      /* 0 = humidity (HTS221) disabled      */
+    int  mag_ms;           /* 0 = magnetometer disabled           */
+    int  colour_ms;        /* 0 = colour sensor disabled          */
+    int  joystick;         /* 0 = joystick disabled               */
     int  i2c_fd;
+    int  joy_fd;
+    int  hts_ok, mag_ok, tcs_ok;
+    hts_cal_t hts_cal;
 } sensehat_ctx_t;
 
 /* ================================================================
@@ -173,8 +274,13 @@ typedef struct {
 typedef struct {
     int odr_bits;
     int buffer_size;
-    int env_ms;
+    int accel_enabled;
     int gyro_enabled;
+    int pressure_ms;
+    int humidity_ms;
+    int mag_ms;
+    int colour_ms;
+    int joystick;
 } sensehat_reg_args_t;
 
 /* ================================================================
@@ -293,6 +399,164 @@ static int lps_read(int fd, double *pressure_hpa, double *temp_c) {
 }
 
 /* ================================================================
+ * HTS221 (humidity + temperature) — init / read
+ * ================================================================ */
+
+static int hts_init(int fd, hts_cal_t *cal) {
+    i2c_set_addr(fd, HTS_ADDR);
+
+    if (i2c_read_byte(fd, HTS_WHO_AM_I) != 0xBC)
+        return -1;
+
+    i2c_write_byte(fd, HTS_CTRL_REG1, 0x87);      /* active, BDU, 12.5 Hz */
+
+    /* Factory calibration block 0x30..0x3F (MSB of sub-address = auto-inc) */
+    uint8_t c[16];
+    if (i2c_read_bytes(fd, HTS_CALIB_0 | 0x80, c, 16) < 0) return -1;
+    cal->h0_rh  = c[0] / 2.0;
+    cal->h1_rh  = c[1] / 2.0;
+    cal->t0_c   = (((c[5] & 0x03) << 8) | c[2]) / 8.0;
+    cal->t1_c   = (((c[5] & 0x0C) << 6) | c[3]) / 8.0;
+    cal->h0_out = to_i16(c[6],  c[7]);
+    cal->h1_out = to_i16(c[10], c[11]);
+    cal->t0_out = to_i16(c[12], c[13]);
+    cal->t1_out = to_i16(c[14], c[15]);
+    if (cal->h1_out == cal->h0_out || cal->t1_out == cal->t0_out)
+        return -1;                                 /* corrupt calibration */
+    return 0;
+}
+
+static int hts_read(int fd, const hts_cal_t *cal, double *rh, double *temp_c) {
+    i2c_set_addr(fd, HTS_ADDR);
+    uint8_t buf[4];
+    if (i2c_read_bytes(fd, HTS_HUMIDITY_OUT | 0x80, buf, 4) < 0) return -1;
+
+    double h_out = to_i16(buf[0], buf[1]);
+    double t_out = to_i16(buf[2], buf[3]);
+    double h = cal->h0_rh + (h_out - cal->h0_out) * (cal->h1_rh - cal->h0_rh)
+                            / (cal->h1_out - cal->h0_out);
+    if (h < 0.0)   h = 0.0;
+    if (h > 100.0) h = 100.0;
+    *rh = h;
+    *temp_c = cal->t0_c + (t_out - cal->t0_out) * (cal->t1_c - cal->t0_c)
+                          / (cal->t1_out - cal->t0_out);
+    return 0;
+}
+
+/* ================================================================
+ * LSM9DS1 magnetometer — init / read
+ * ================================================================ */
+
+static int mag_init(int fd) {
+    i2c_set_addr(fd, LSM_M_ADDR);
+
+    if (i2c_read_byte(fd, MAG_WHO_AM_I) != 0x3D)
+        return -1;
+
+    i2c_write_byte(fd, MAG_CTRL_REG1, 0x7C);      /* X/Y ultra-high perf, 80 Hz */
+    i2c_write_byte(fd, MAG_CTRL_REG2, 0x00);      /* ±4 gauss                   */
+    i2c_write_byte(fd, MAG_CTRL_REG3, 0x00);      /* continuous conversion      */
+    i2c_write_byte(fd, MAG_CTRL_REG4, 0x0C);      /* Z ultra-high perf          */
+    return 0;
+}
+
+static int mag_read(int fd, double *mx, double *my, double *mz) {
+    i2c_set_addr(fd, LSM_M_ADDR);
+    uint8_t buf[6];
+    if (i2c_read_bytes(fd, MAG_OUT_X_L | 0x80, buf, 6) < 0) return -1;
+    *mx = to_i16(buf[0], buf[1]) * MAG_SCALE;
+    *my = to_i16(buf[2], buf[3]) * MAG_SCALE;
+    *mz = to_i16(buf[4], buf[5]) * MAG_SCALE;
+    return 0;
+}
+
+/* ================================================================
+ * TCS34725 colour sensor (Sense HAT v2 only) — init / read
+ * ================================================================ */
+
+static int tcs_init(int fd) {
+    i2c_set_addr(fd, TCS_ADDR);
+
+    int id = i2c_read_byte(fd, TCS_CMD | TCS_ID);
+    if (id != 0x44 && id != 0x4D)
+        return -1;
+
+    i2c_write_byte(fd, TCS_CMD | TCS_ENABLE,  0x01);   /* power on              */
+    usleep(3000);                                      /* >= 2.4 ms warm-up     */
+    i2c_write_byte(fd, TCS_CMD | TCS_ENABLE,  0x03);   /* power on + RGBC       */
+    i2c_write_byte(fd, TCS_CMD | TCS_ATIME,   0xC0);   /* 64 cycles = 154 ms    */
+    i2c_write_byte(fd, TCS_CMD | TCS_CONTROL, 0x02);   /* gain 16x (indoor)     */
+    return 0;
+}
+
+static int tcs_read(int fd, uint16_t rgbc[4]) {
+    i2c_set_addr(fd, TCS_ADDR);
+    uint8_t buf[8];                                    /* C, R, G, B (LE u16)  */
+    if (i2c_read_bytes(fd, TCS_CMD_AUTOINC | TCS_CDATAL, buf, 8) < 0) return -1;
+    rgbc[0] = buf[2] | (buf[3] << 8);                  /* r */
+    rgbc[1] = buf[4] | (buf[5] << 8);                  /* g */
+    rgbc[2] = buf[6] | (buf[7] << 8);                  /* b */
+    rgbc[3] = buf[0] | (buf[1] << 8);                  /* clear */
+    return 0;
+}
+
+/* ================================================================
+ * Joystick — Linux input event device of the sensehat_joystick driver
+ * ================================================================ */
+
+static int joy_open(void) {
+    int fd = open(JOY_BY_PATH, O_RDONLY | O_NONBLOCK);
+    if (fd >= 0) return fd;
+
+    /* Fall back to scanning event devices for the joystick's name. */
+    for (int i = 0; i < 32; i++) {
+        char path[32], name[128] = {0};
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+        fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+        if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0 &&
+            strcmp(name, JOY_NAME) == 0)
+            return fd;
+        close(fd);
+    }
+    return -1;
+}
+
+static const char *joy_direction(int code) {
+    switch (code) {
+    case KEY_UP:    return "up";
+    case KEY_DOWN:  return "down";
+    case KEY_LEFT:  return "left";
+    case KEY_RIGHT: return "right";
+    case KEY_ENTER: return "middle";
+    default:        return NULL;
+    }
+}
+
+static const char *joy_action(int value) {
+    switch (value) {
+    case 0:  return "release";
+    case 1:  return "press";
+    default: return "hold";
+    }
+}
+
+/* Drain pending key events (non-blocking) into the pump. */
+static void joy_poll(sa_datapump *pump, int fd) {
+    struct input_event ev;
+    while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+        if (ev.type != EV_KEY || !joy_direction(ev.code)) continue;
+        sensehat_item_t item;
+        item.tspec.tv_sec  = ev.input_event_sec;
+        item.tspec.tv_nsec = ev.input_event_usec * 1000L;
+        item.flow          = FLOW_JOYSTICK;
+        item.d.key.code    = ev.code;
+        item.d.key.value   = ev.value;
+        sa_datapump_push(pump, &item);
+    }
+}
+
+/* ================================================================
  * Datapump callbacks
  * ================================================================ */
 
@@ -316,9 +580,12 @@ static size_t sensehat_get_flow_name(sa_datapump *pump, void *data,
  * create_item_fn — called on SA Engine thread with kernel locked.
  *
  * Every item becomes Timeval wrapping [flow_name, payload]:
- *   accel/gyro  → ["accel", [x, y, z]]  or  ["gyro", [x, y, z]]
- *   pressure    → ["pressure", hPa]
- *   temperature → ["temp", °C]
+ *   accel/gyro/mag   → ["accel", [x, y, z]]  (likewise "gyro", "mag")
+ *   pressure         → ["pressure", hPa]
+ *   temperature      → ["temp", °C]  (likewise "humidity_temp")
+ *   humidity         → ["humidity", %rH]
+ *   colour           → ["colour", [r, g, b, c]]
+ *   joystick         → ["joystick", [dir, action]]
  */
 static void sensehat_make_item(ohandle *ret, sa_datapump *pump, void *data) {
     (void)pump;
@@ -327,7 +594,8 @@ static void sensehat_make_item(ohandle *ret, sa_datapump *pump, void *data) {
 
     switch (item->flow) {
     case FLOW_ACCEL:
-    case FLOW_GYRO: {
+    case FLOW_GYRO:
+    case FLOW_MAG: {
         ohandle v = new_array(3, nil);
         a_seta(v, 0, mkreal(item->d.vec3.x));
         a_seta(v, 1, mkreal(item->d.vec3.y));
@@ -337,8 +605,24 @@ static void sensehat_make_item(ohandle *ret, sa_datapump *pump, void *data) {
     }
     case FLOW_PRESSURE:
     case FLOW_TEMP:
+    case FLOW_HUMIDITY:
+    case FLOW_HUMIDITY_TEMP:
         payload = mkreal(item->d.scalar);
         break;
+    case FLOW_COLOUR: {
+        ohandle v = new_array(4, nil);
+        for (int i = 0; i < 4; i++)
+            a_seta(v, i, mkinteger(item->d.rgbc[i]));
+        payload = v;
+        break;
+    }
+    case FLOW_JOYSTICK: {
+        ohandle v = new_array(2, nil);
+        a_seta(v, 0, mkstring(joy_direction(item->d.key.code)));
+        a_seta(v, 1, mkstring(joy_action(item->d.key.value)));
+        payload = v;
+        break;
+    }
     }
 
     ohandle wrapper = new_array(2, nil);
@@ -352,11 +636,113 @@ static void sensehat_make_item(ohandle *ret, sa_datapump *pump, void *data) {
 /* ================================================================
  * Background I2C reader thread
  *
- * Owns the I2C file descriptor for its lifetime.  Reads the
- * LSM9DS1 FIFO (accel, optionally gyro) and periodically the
- * LPS25H (pressure, temperature).  Each reading is pushed as a
- * tagged item into the datapump circular buffer.
+ * Owns the I2C file descriptor (and the joystick event device) for
+ * its lifetime.  Reads the LSM9DS1 FIFO (accel, optionally gyro) and
+ * polls the slower sensors on their own intervals.  Every reading is
+ * pushed from this one thread as a tagged item into the datapump
+ * circular buffer (the buffer is single-producer).
  * ================================================================ */
+
+static double now_s(struct timespec *ts) {
+    clock_gettime(CLOCK_REALTIME, ts);
+    return ts->tv_sec + ts->tv_nsec * 1e-9;
+}
+
+/* Last poll times of the slower sources, owned by the reader thread. */
+typedef struct {
+    double press, hum, mag, colour, joy;
+} sensehat_polls_t;
+
+/* Poll pressure/temp/humidity, magnetometer, colour and joystick when
+   their interval is due.  Leaves the I2C address on the accel/gyro. */
+static void poll_aux(sa_datapump *pump, sensehat_ctx_t *ctx,
+                     sensehat_polls_t *last) {
+    int fd = ctx->i2c_fd;
+    struct timespec ts;
+    double now = now_s(&ts);
+    sensehat_item_t item;
+    item.tspec = ts;
+
+    if (ctx->pressure_ms > 0 && now - last->press >= ctx->pressure_ms / 1000.0) {
+        last->press = now;
+        double pressure, temp;
+        if (lps_read(fd, &pressure, &temp) == 0) {
+            item.flow = FLOW_PRESSURE; item.d.scalar = pressure;
+            sa_datapump_push(pump, &item);
+            item.flow = FLOW_TEMP;     item.d.scalar = temp;
+            sa_datapump_push(pump, &item);
+        }
+        i2c_set_addr(fd, LSM_AG_ADDR);
+    }
+
+    if (ctx->hts_ok && now - last->hum >= ctx->humidity_ms / 1000.0) {
+        last->hum = now;
+        double rh, htemp;
+        if (hts_read(fd, &ctx->hts_cal, &rh, &htemp) == 0) {
+            item.flow = FLOW_HUMIDITY;      item.d.scalar = rh;
+            sa_datapump_push(pump, &item);
+            item.flow = FLOW_HUMIDITY_TEMP; item.d.scalar = htemp;
+            sa_datapump_push(pump, &item);
+        }
+        i2c_set_addr(fd, LSM_AG_ADDR);
+    }
+
+    if (ctx->mag_ok && now - last->mag >= ctx->mag_ms / 1000.0) {
+        last->mag = now;
+        if (mag_read(fd, &item.d.vec3.x, &item.d.vec3.y, &item.d.vec3.z) == 0) {
+            item.flow = FLOW_MAG;
+            sa_datapump_push(pump, &item);
+        }
+        i2c_set_addr(fd, LSM_AG_ADDR);
+    }
+
+    if (ctx->tcs_ok && now - last->colour >= ctx->colour_ms / 1000.0) {
+        last->colour = now;
+        if (tcs_read(fd, item.d.rgbc) == 0) {
+            item.flow = FLOW_COLOUR;
+            sa_datapump_push(pump, &item);
+        }
+        i2c_set_addr(fd, LSM_AG_ADDR);
+    }
+
+    if (ctx->joy_fd >= 0 && now - last->joy >= JOY_POLL_S) {
+        last->joy = now;
+        joy_poll(pump, ctx->joy_fd);
+    }
+}
+
+/* Probe the optional devices.  A missing one only disables (and sends
+   an error to) its own flow, so e.g. a v1 HAT without the colour
+   sensor still streams everything else. */
+static void init_optional(sa_datapump *pump, sensehat_ctx_t *ctx) {
+    int fd = ctx->i2c_fd;
+
+    if (ctx->humidity_ms > 0) {
+        ctx->hts_ok = hts_init(fd, &ctx->hts_cal) == 0;
+        if (!ctx->hts_ok)
+            sa_datapump_send_error(pump, "humidity*",
+                                   "sensehat: HTS221 not found on I2C bus");
+    }
+    if (ctx->mag_ms > 0) {
+        ctx->mag_ok = mag_init(fd) == 0;
+        if (!ctx->mag_ok)
+            sa_datapump_send_error(pump, "mag",
+                "sensehat: LSM9DS1 magnetometer not found on I2C bus");
+    }
+    if (ctx->colour_ms > 0) {
+        ctx->tcs_ok = tcs_init(fd) == 0;
+        if (!ctx->tcs_ok)
+            sa_datapump_send_error(pump, "colour",
+                "sensehat: TCS34725 colour sensor not found (Sense HAT v1?)");
+    }
+    if (ctx->joystick) {
+        ctx->joy_fd = joy_open();
+        if (ctx->joy_fd < 0)
+            sa_datapump_send_error(pump, "joystick",
+                                   "sensehat: joystick input device not found");
+    }
+    i2c_set_addr(fd, LSM_AG_ADDR);
+}
 
 static void sensehat_reader_thread(size_t arg) {
     sa_datapump *pump = (sa_datapump *)arg;
@@ -371,9 +757,10 @@ static void sensehat_reader_thread(size_t arg) {
     }
 
     int fd       = ctx->i2c_fd;
-    int need_lps = ctx->env_ms > 0;
+    int need_lps = ctx->pressure_ms > 0;
+    int imu      = ctx->accel_enabled || ctx->gyro_enabled;
 
-    if (lsm_init(fd, ctx->odr_bits, ctx->gyro_enabled) < 0) {
+    if (imu && lsm_init(fd, ctx->odr_bits, ctx->gyro_enabled) < 0) {
         sa_datapump_send_error(pump, "*",
                                "sensehat: LSM9DS1 not found on I2C bus");
         close(fd); ctx->i2c_fd = -1; ctx->done = TRUE;
@@ -385,12 +772,18 @@ static void sensehat_reader_thread(size_t arg) {
         close(fd); ctx->i2c_fd = -1; ctx->done = TRUE;
         return;
     }
+    init_optional(pump, ctx);
 
-    double env_interval_s = ctx->env_ms / 1000.0;
-    double last_lps = 0.0;
+    sensehat_polls_t last = {0.0, 0.0, 0.0, 0.0, 0.0};
 
     while (ctx->running) {
-        i2c_set_addr(fd, LSM_AG_ADDR);
+        poll_aux(pump, ctx, &last);
+
+        if (!imu) {                     /* accel and gyro off: aux sources only */
+            sa_sys_sleep(1000);
+            continue;
+        }
+
         int n = lsm_fifo_count(fd);
         if (n <= 0) {
             sa_sys_sleep(200);          /* 200 µs — sub-sample polling */
@@ -417,33 +810,12 @@ static void sensehat_reader_thread(size_t arg) {
             item.flow = FLOW_ACCEL;
             sa_datapump_push(pump, &item);
         }
-
-        /* ---- Pressure / temperature polling ---- */
-        if (need_lps) {
-            struct timespec now_ts;
-            clock_gettime(CLOCK_REALTIME, &now_ts);
-            double now = now_ts.tv_sec + now_ts.tv_nsec * 1e-9;
-
-            if (now - last_lps >= env_interval_s) {
-                last_lps = now;
-                double pressure, temp;
-                if (lps_read(fd, &pressure, &temp) == 0) {
-                    sensehat_item_t env_item;
-                    env_item.tspec = now_ts;
-
-                    env_item.flow     = FLOW_PRESSURE;
-                    env_item.d.scalar = pressure;
-                    sa_datapump_push(pump, &env_item);
-
-                    env_item.flow     = FLOW_TEMP;
-                    env_item.d.scalar = temp;
-                    sa_datapump_push(pump, &env_item);
-                }
-                i2c_set_addr(fd, LSM_AG_ADDR);
-            }
-        }
     }
 
+    if (ctx->joy_fd >= 0) {
+        close(ctx->joy_fd);
+        ctx->joy_fd = -1;
+    }
     close(fd);
     ctx->i2c_fd = -1;
     ctx->done = TRUE;
@@ -464,7 +836,6 @@ static ohandle sensehat_pump_starter(void *argsp, char *dname) {
     sensehat_reg_args_t *args = (sensehat_reg_args_t *)argsp;
     int odr_bits    = args ? args->odr_bits     : 6;
     int buffer_size = args ? args->buffer_size  : 2048;
-    int env_ms      = args ? args->env_ms       : 1000;
     int gyro        = args ? args->gyro_enabled : 0;
 
     /* Free leftover ctx from a previous stop/restart cycle. */
@@ -475,12 +846,19 @@ static ohandle sensehat_pump_starter(void *argsp, char *dname) {
 
     sensehat_ctx_t *ctx =
         (sensehat_ctx_t *)sa_sys_malloc(sizeof(sensehat_ctx_t));
+    memset(ctx, 0, sizeof(*ctx));
     ctx->running      = TRUE;
     ctx->done         = FALSE;
-    ctx->odr_bits     = odr_bits;
-    ctx->gyro_enabled = gyro;
-    ctx->env_ms       = env_ms;
+    ctx->odr_bits      = odr_bits;
+    ctx->accel_enabled = args ? args->accel_enabled : 1;
+    ctx->gyro_enabled  = gyro;
+    ctx->pressure_ms   = args ? args->pressure_ms : 1000;
+    ctx->humidity_ms   = args ? args->humidity_ms : 1000;
+    ctx->mag_ms       = args ? args->mag_ms    : 0;
+    ctx->colour_ms    = args ? args->colour_ms : 0;
+    ctx->joystick     = args ? args->joystick  : 0;
     ctx->i2c_fd       = -1;
+    ctx->joy_fd       = -1;
 
     sa_datapump *pump      = sa_datapump_create();
     pump->pump_name        = dname;
@@ -508,35 +886,121 @@ static void sensehat_pump_stopper(sa_datapump *pump) {
         a_sleep(0.01);
 }
 
+/* Tear down the running pump (reader thread + datapump consumer).
+   Returns 1 if a pump was stopped, 0 if nothing was running. */
+static int stop_running_pump(void) {
+    if (!g_pump) return 0;
+    sensehat_pump_stopper(g_pump);
+    sa_datapump_destroy(g_pump);
+    /* Let consumer thread drain and exit before re-use. */
+    a_sleep(0.2);
+    /* Drop the engine's reference so shutdown does not invoke the
+       registered stopper on this already stopped pump. */
+    ohandle rname = nil, rres = nil;
+    a_setf(rname, mkstring("sensehat"));
+    a_setf(rres, call_lisp(mksymbol("reset-ext-pubsub-instance"),
+                           NULL, 1, rname));
+    a_free(rname);
+    a_free(rres);
+    g_pump = NULL;
+    /* g_ctx freed by next starter call */
+    return 1;
+}
+
 /*
  * sensehat:stop() -> Integer
  *
- * Tears down the running pump (reader thread + datapump consumer)
- * so that register_sensehat_pump can be called again with new settings.
+ * Tears down the running pump so that register_sensehat_pump can be
+ * called again with new settings.
  * Returns 1 if a pump was stopped, 0 if nothing was running.
  */
 static ohandle sensehat_stopBF(a_callcontext cxt) {
-    int stopped = 0;
-    if (g_pump) {
-        sensehat_pump_stopper(g_pump);
-        sa_datapump_destroy(g_pump);
-        /* Let consumer thread drain and exit before re-use. */
-        a_sleep(0.2);
-        /* Drop the engine's reference so shutdown does not invoke the
-           registered stopper on this already stopped pump. */
-        ohandle rname = nil, rres = nil;
-        a_setf(rname, mkstring("sensehat"));
-        a_setf(rres, call_lisp(mksymbol("reset-ext-pubsub-instance"),
-                               NULL, 1, rname));
-        a_free(rname);
-        a_free(rres);
-        g_pump = NULL;
-        /* g_ctx freed by next starter call */
-        stopped = 1;
-    }
-    a_bind(cxt, 1, mkinteger(stopped));
+    a_bind(cxt, 1, mkinteger(stop_running_pump()));
     a_result(cxt);
     return nil;
+}
+
+/* Register the "sensehat" pump.  If one is running, stop it first:
+   re-registering under a live reader thread used to make the next
+   starter free the context that thread still uses (segfault). */
+static void register_pump(sensehat_reg_args_t *args) {
+    if (stop_running_pump())
+        a_sleep(0.5);                   /* let the I2C devices settle */
+    sa_datapump_register(args, "sensehat",
+                         sensehat_pump_starter, sensehat_pump_stopper);
+}
+
+/* ================================================================
+ * I2C bus budget
+ *
+ * Every sample is its own I2C transaction (a register write plus a
+ * 4-8 byte read). At the default 100 kHz bus clock the Pi 4 completes
+ * about 1100 of them per second: measured 2 x 547 Hz with accel and
+ * gyro at ODR 6 on a Sense HAT v2, with the VPU core clock fixed at
+ * 500 MHz. The I2C clock is divided from the core clock, so with the
+ * ondemand governor and no core_freq_min=500 the bus slows to 60 % and
+ * every budget below is optimistic.
+ * ================================================================ */
+
+#define I2C_BASE_HZ          100000.0   /* the Pi's default i2c_arm_baudrate */
+#define I2C_TX_PER_S_AT_BASE 1050.0     /* usable 6-byte transactions/s at 100 kHz */
+
+static const double LSM_ODR_HZ[7] = {0.0, 14.9, 59.5, 119.0, 238.0, 476.0, 952.0};
+
+/* The configured bus clock: dtparam=i2c_arm_baudrate ends up in the
+   device tree; absent means the 100 kHz default. */
+static double i2c_bus_hz(void) {
+    FILE *f = fopen("/sys/class/i2c-adapter/i2c-1/of_node/clock-frequency", "rb");
+    if (!f) return I2C_BASE_HZ;
+    unsigned char b[4];
+    size_t got = fread(b, 1, 4, f);
+    fclose(f);
+    if (got != 4) return I2C_BASE_HZ;
+    double hz = (double)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
+    return hz > 0 ? hz : I2C_BASE_HZ;
+}
+
+/* Transactions per second a request needs: one per accel and one per
+   gyro sample, one per pressure, humidity, mag and colour poll. */
+static int i2c_load(const sensehat_reg_args_t *a) {
+    double tx = LSM_ODR_HZ[a->odr_bits] * (a->accel_enabled + a->gyro_enabled);
+    if (a->pressure_ms > 0) tx += 1000.0 / a->pressure_ms;
+    if (a->humidity_ms > 0) tx += 1000.0 / a->humidity_ms;
+    if (a->mag_ms > 0)      tx += 1000.0 / a->mag_ms;
+    if (a->colour_ms > 0)   tx += 1000.0 / a->colour_ms;
+    return (int)(tx + 0.5);
+}
+
+static int i2c_budget(void) {
+    return (int)(I2C_TX_PER_S_AT_BASE * i2c_bus_hz() / I2C_BASE_HZ);
+}
+
+/* Validate, check the budget, register.  Returns NULL on success, or an
+   error message (with *err_arg set to the offending value). */
+static const char *check_and_register(sensehat_reg_args_t *args, ohandle *err_arg) {
+    if (args->gyro_enabled && !args->accel_enabled) {
+        *err_arg = mkinteger(args->gyro_enabled);
+        return "sensehat: gyro needs accel (the LSM9DS1 FIFO pairs them)";
+    }
+    if (args->buffer_size < 1) {
+        *err_arg = mkinteger(args->buffer_size);
+        return "sensehat: bufsize must be positive";
+    }
+    int load = i2c_load(args);
+    if (load > i2c_budget()) {
+        *err_arg = mkinteger(load);
+        return "sensehat: request exceeds the I2C bus budget (lower odr, "
+               "turn gyro off or poll slower)";
+    }
+    register_pump(args);
+    return NULL;
+}
+
+static sensehat_reg_args_t *new_args(void) {
+    sensehat_reg_args_t *args =
+        (sensehat_reg_args_t *)sa_sys_malloc(sizeof(sensehat_reg_args_t));
+    memset(args, 0, sizeof(*args));
+    return args;
 }
 
 /* ================================================================
@@ -544,36 +1008,257 @@ static ohandle sensehat_stopBF(a_callcontext cxt) {
  *   register_sensehat_pump(Integer odr, Integer bufsize,
  *                          Integer env_ms, Integer enable_gyro)
  *     -> Charstring
+ * The original signature: accel always on, env_ms drives pressure,
+ * temperature and humidity.
  * ================================================================ */
 
 static ohandle register_sensehat_pumpBBF(a_callcontext cxt) {
     ohandle odr_oh  = a_arg(cxt, 1);
-    ohandle buf_oh  = a_arg(cxt, 2);
-    ohandle env_oh  = a_arg(cxt, 3);
-    ohandle gyro_oh = a_arg(cxt, 4);
-
     int odr_bits, bufsize, env_ms, gyro;
-    IntoInteger32(odr_oh,  odr_bits, a_env(cxt));
-    IntoInteger32(buf_oh,  bufsize,  a_env(cxt));
-    IntoInteger32(env_oh,  env_ms,   a_env(cxt));
-    IntoInteger32(gyro_oh, gyro,     a_env(cxt));
+    IntoInteger32(odr_oh,         odr_bits, a_env(cxt));
+    IntoInteger32(a_arg(cxt, 2),  bufsize,  a_env(cxt));
+    IntoInteger32(a_arg(cxt, 3),  env_ms,   a_env(cxt));
+    IntoInteger32(a_arg(cxt, 4),  gyro,     a_env(cxt));
 
     if (odr_bits < 1 || odr_bits > 6) {
         a_raise_errorno(SENSEHAT_INVALID_ODR, odr_oh);
         return nil;
     }
 
-    sensehat_reg_args_t *args =
-        (sensehat_reg_args_t *)sa_sys_malloc(sizeof(sensehat_reg_args_t));
-    args->odr_bits     = odr_bits;
-    args->buffer_size  = bufsize;
-    args->env_ms       = env_ms;
-    args->gyro_enabled = gyro ? 1 : 0;
+    sensehat_reg_args_t *args = new_args();
+    args->odr_bits      = odr_bits;
+    args->buffer_size   = bufsize;
+    args->accel_enabled = 1;
+    args->gyro_enabled  = gyro ? 1 : 0;
+    args->pressure_ms   = env_ms > 0 ? env_ms : 0;
+    args->humidity_ms   = env_ms > 0 ? env_ms : 0;
 
-    sa_datapump_register(args, "sensehat",
-                         sensehat_pump_starter, sensehat_pump_stopper);
-
+    ohandle err_arg = nil;
+    const char *err = check_and_register(args, &err_arg);
+    if (err) {
+        sa_sys_free(args);
+        return a_throw_errormsg(a_env(cxt), (char *)err, err_arg);
+    }
     a_bind(cxt, 5, mkstring("sensehat"));
+    a_result(cxt);
+    return nil;
+}
+
+/* ================================================================
+ * Foreign function, every sensor named:
+ *   register_sensehat_pump(Integer odr, Integer bufsize,
+ *                          Integer accel, Integer gyro,
+ *                          Integer pressure_ms, Integer humidity_ms,
+ *                          Integer mag_ms, Integer colour_ms,
+ *                          Integer joystick)
+ *     -> Charstring
+ * A _ms of 0 (or less) turns that sensor off.
+ * ================================================================ */
+
+static ohandle register_sensehat_pump_allBBBBBBBBBF(a_callcontext cxt) {
+    int v[9];
+    for (int i = 0; i < 9; i++)
+        IntoInteger32(a_arg(cxt, i + 1), v[i], a_env(cxt));
+
+    if (v[0] < 1 || v[0] > 6) {
+        a_raise_errorno(SENSEHAT_INVALID_ODR, a_arg(cxt, 1));
+        return nil;
+    }
+
+    sensehat_reg_args_t *args = new_args();
+    args->odr_bits      = v[0];
+    args->buffer_size   = v[1];
+    args->accel_enabled = v[2] ? 1 : 0;
+    args->gyro_enabled  = v[3] ? 1 : 0;
+    args->pressure_ms   = v[4] > 0 ? v[4] : 0;
+    args->humidity_ms   = v[5] > 0 ? v[5] : 0;
+    args->mag_ms        = v[6] > 0 ? v[6] : 0;
+    args->colour_ms     = v[7] > 0 ? v[7] : 0;
+    args->joystick      = v[8] ? 1 : 0;
+
+    ohandle err_arg = nil;
+    const char *err = check_and_register(args, &err_arg);
+    if (err) {
+        sa_sys_free(args);
+        return a_throw_errormsg(a_env(cxt), (char *)err, err_arg);
+    }
+    a_bind(cxt, 10, mkstring("sensehat"));
+    a_result(cxt);
+    return nil;
+}
+
+/* ================================================================
+ * LED matrix — the 8x8 RGB565 framebuffer of the rpisense_fb driver
+ *
+ * Independent of the pump.  The device is found by its fb name and
+ * kept open; every call rewrites the whole frame from a shadow copy.
+ * ================================================================ */
+
+#define LED_FB_NAME          "RPi-Sense FB"
+#define LED_FBIORESET_GAMMA  0xF102     /* rpisense_fb gamma reset ioctl */
+#define LED_GAMMA_DEFAULT    0
+#define LED_GAMMA_LOW        1
+
+static int      g_led_fd = -1;
+static uint16_t g_led[64];
+
+static int led_open(void) {
+    if (g_led_fd >= 0) return g_led_fd;
+    for (int i = 0; i < 8; i++) {
+        char path[64], name[64] = {0};
+        snprintf(path, sizeof(path), "/sys/class/graphics/fb%d/name", i);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (fgets(name, sizeof(name), f)) name[strcspn(name, "\n")] = 0;
+        fclose(f);
+        if (strcmp(name, LED_FB_NAME) != 0) continue;
+        snprintf(path, sizeof(path), "/dev/fb%d", i);
+        g_led_fd = open(path, O_RDWR);
+        if (g_led_fd >= 0 &&
+            pread(g_led_fd, g_led, sizeof(g_led), 0) != (ssize_t)sizeof(g_led))
+            memset(g_led, 0, sizeof(g_led));
+        return g_led_fd;
+    }
+    return -1;
+}
+
+static uint16_t rgb565(int r, int g, int b) {
+    return (uint16_t)((((r >> 3) & 0x1F) << 11) |
+                      (((g >> 2) & 0x3F) << 5)  |
+                       ((b >> 3) & 0x1F));
+}
+
+/* Write the shadow frame; returns NULL on success, else an error text. */
+static const char *led_flush(void) {
+    if (led_open() < 0)
+        return "sensehat: LED framebuffer '" LED_FB_NAME "' not found";
+    if (pwrite(g_led_fd, g_led, sizeof(g_led), 0) != (ssize_t)sizeof(g_led))
+        return "sensehat: failed to write LED framebuffer";
+    return NULL;
+}
+
+/* Open the device (which loads the shadow copy from the display) BEFORE a
+   caller modifies the shadow; otherwise the first write after opening
+   would be overwritten by the old frame. */
+#define LED_OPEN_OR_THROW(cxt)                                              \
+    if (led_open() < 0)                                                     \
+        return a_throw_errormsg(a_env(cxt),                                 \
+            "sensehat: LED framebuffer '" LED_FB_NAME "' not found", nil)
+
+/* One colour component: an Integer (or Real, truncated) in 0-255. */
+static int led_component(ohandle h, int *out) {
+    double v;
+    if (integerp(h))   v = (double)getinteger(h);
+    else if (realp(h)) v = getreal(h);
+    else return -1;
+    if (v < 0 || v >= 256) return -1;   /* range-check before narrowing */
+    *out = (int)v;
+    return 0;
+}
+
+/* Read r,g,b components 0-255 from three handles into RGB565.
+   Returns 0, or the position (1-3) of the first invalid component. */
+static int led_rgb(ohandle r_oh, ohandle g_oh, ohandle b_oh, uint16_t *out) {
+    int r, g, b;
+    if (led_component(r_oh, &r) < 0) return 1;
+    if (led_component(g_oh, &g) < 0) return 2;
+    if (led_component(b_oh, &b) < 0) return 3;
+    *out = rgb565(r, g, b);
+    return 0;
+}
+
+/* sensehat:led_clear(Integer r, Integer g, Integer b) -> Integer */
+static ohandle sensehat_led_clearBBBF(a_callcontext cxt) {
+    uint16_t c;
+    int bad;
+    LED_OPEN_OR_THROW(cxt);
+    if ((bad = led_rgb(a_arg(cxt, 1), a_arg(cxt, 2), a_arg(cxt, 3), &c)))
+        return a_throw_errormsg(a_env(cxt), "sensehat: colour must be 0-255",
+                                a_arg(cxt, bad));
+    for (int i = 0; i < 64; i++) g_led[i] = c;
+    const char *err = led_flush();
+    if (err) return a_throw_errormsg(a_env(cxt), (char *)err, nil);
+    a_bind(cxt, 4, mkinteger(1));
+    a_result(cxt);
+    return nil;
+}
+
+/* sensehat:led_pixel(Integer x, Integer y, Integer r, Integer g, Integer b)
+     -> Integer      (x = column, y = row, both 0-7) */
+static ohandle sensehat_led_pixelBBBBBF(a_callcontext cxt) {
+    int x, y, bad;
+    uint16_t c;
+    LED_OPEN_OR_THROW(cxt);
+    IntoInteger32(a_arg(cxt, 1), x, a_env(cxt));
+    IntoInteger32(a_arg(cxt, 2), y, a_env(cxt));
+    if (x < 0 || x > 7 || y < 0 || y > 7)
+        return a_throw_errormsg(a_env(cxt), "sensehat: x and y must be 0-7",
+                                a_arg(cxt, x < 0 || x > 7 ? 1 : 2));
+    if ((bad = led_rgb(a_arg(cxt, 3), a_arg(cxt, 4), a_arg(cxt, 5), &c)))
+        return a_throw_errormsg(a_env(cxt), "sensehat: colour must be 0-255",
+                                a_arg(cxt, 2 + bad));
+    g_led[y * 8 + x] = c;
+    const char *err = led_flush();
+    if (err) return a_throw_errormsg(a_env(cxt), (char *)err, nil);
+    a_bind(cxt, 6, mkinteger(1));
+    a_result(cxt);
+    return nil;
+}
+
+/* sensehat:led_pixels(Vector px) -> Integer
+     px = 64 x [r, g, b], row-major (index = y*8 + x) */
+static ohandle sensehat_led_pixelsBF(a_callcontext cxt) {
+    ohandle px = a_arg(cxt, 1);
+    LED_OPEN_OR_THROW(cxt);
+    if (a_arraysize(px) != 64)
+        return a_throw_errormsg(a_env(cxt),
+                                "sensehat: led_pixels needs 64 [r,g,b] vectors", px);
+    uint16_t frame[64];
+    for (int i = 0; i < 64; i++) {
+        ohandle p = a_elt(px, i);
+        if (!arrayp(p) || a_arraysize(p) != 3 ||
+            led_rgb(a_elt(p, 0), a_elt(p, 1), a_elt(p, 2), &frame[i]))
+            return a_throw_errormsg(a_env(cxt),
+                                    "sensehat: each pixel must be [r,g,b] in 0-255", p);
+    }
+    memcpy(g_led, frame, sizeof(g_led));
+    const char *err = led_flush();
+    if (err) return a_throw_errormsg(a_env(cxt), (char *)err, nil);
+    a_bind(cxt, 2, mkinteger(1));
+    a_result(cxt);
+    return nil;
+}
+
+/* sensehat:led_get_pixels() -> Vector of 64 [r, g, b] read from the device */
+static ohandle sensehat_led_get_pixelsF(a_callcontext cxt) {
+    LED_OPEN_OR_THROW(cxt);
+    uint16_t frame[64];
+    if (pread(g_led_fd, frame, sizeof(frame), 0) != (ssize_t)sizeof(frame))
+        return a_throw_errormsg(a_env(cxt),
+                                "sensehat: failed to read LED framebuffer", nil);
+    ohandle res = new_array(64, nil);
+    for (int i = 0; i < 64; i++) {
+        ohandle p = new_array(3, nil);
+        a_seta(p, 0, mkinteger((frame[i] >> 8) & 0xF8));
+        a_seta(p, 1, mkinteger((frame[i] >> 3) & 0xFC));
+        a_seta(p, 2, mkinteger((frame[i] << 3) & 0xF8));
+        a_seta(res, i, p);
+    }
+    a_bind(cxt, 1, res);
+    a_result(cxt);
+    return nil;
+}
+
+/* sensehat:led_low_light(Integer on) -> Integer  (driver gamma table) */
+static ohandle sensehat_led_low_lightBF(a_callcontext cxt) {
+    int on;
+    IntoInteger32(a_arg(cxt, 1), on, a_env(cxt));
+    LED_OPEN_OR_THROW(cxt);
+    if (ioctl(g_led_fd, LED_FBIORESET_GAMMA,
+              on ? LED_GAMMA_LOW : LED_GAMMA_DEFAULT) < 0)
+        return a_throw_errormsg(a_env(cxt),
+                                "sensehat: failed to set LED gamma", a_arg(cxt, 1));
+    a_bind(cxt, 2, mkinteger(on ? 1 : 0));
     a_result(cxt);
     return nil;
 }
@@ -585,7 +1270,14 @@ static ohandle register_sensehat_pumpBBF(a_callcontext cxt) {
 EXPORT void a_initialize_extension() {
     load_accel_cal();
     a_extimpl("register-sensehat-pump----+", register_sensehat_pumpBBF);
+    a_extimpl("register-sensehat-pump-all---------+",
+              register_sensehat_pump_allBBBBBBBBBF);
     a_extimpl("sensehat-stop+",              sensehat_stopBF);
+    a_extimpl("sensehat-led-clear---+",      sensehat_led_clearBBBF);
+    a_extimpl("sensehat-led-pixel-----+",    sensehat_led_pixelBBBBBF);
+    a_extimpl("sensehat-led-pixels-+",       sensehat_led_pixelsBF);
+    a_extimpl("sensehat-led-get-pixels+",    sensehat_led_get_pixelsF);
+    a_extimpl("sensehat-led-low-light-+",    sensehat_led_low_lightBF);
     SENSEHAT_INVALID_ODR =
         a_register_error("sensehat: ODR must be 1-6");
 }

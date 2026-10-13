@@ -1,0 +1,28 @@
+/*-*-sql-*-
+ * test-sa.rpi-sensehat-v2.osql — tests for Sense HAT v2-only hardware
+ *
+ * The colour sensor (TCS34725 at 0x29) exists on the Sense HAT v2 only.
+ * Everything that v1 and v2 share is tested in test-sa.rpi-sensehat.osql.
+ *
+ * Run with:
+ *   sa.engine -O test-sa.rpi-sensehat-v2.osql
+ */
+
+load_osql('sa.rpi-sensehat.osql');
+
+register_sensehat_pump(2, 4096, 1, 0, 200, 200, 50, 200, 0);
+
+validate "colour payload is [r,g,b,c] of non-negative counts"
+   check select dim(c) = 4 and c[1] >= 0 and c[2] >= 0 and c[3] >= 0 and c[4] >= 0
+           from Vector of Integer c
+          where c = sensehat:rgbc(first(first_n(sensehat:flow("colour"), 1))) => true;
+
+validate "merged flows including colour carry their topics"
+   check (select distinct sensehat:topic(v)
+            from Timeval v
+           where v in extract(first_n(
+                   sensehat:signal_flows(["mag","colour","humidity"]), 40)))
+         => values "mag", "colour", "humidity";
+
+sensehat:stop();
+quit;

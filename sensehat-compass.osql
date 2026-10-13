@@ -1,0 +1,86 @@
+/*-*-sql-*-
+ * sensehat-compass.osql — magnetometer calibration and compass heading
+ *
+ * Needs sa.rpi-sensehat.osql and sensehat-streams.osql, and a pump with
+ * the magnetometer on (mag_ms > 0):
+ *   load_osql('sa.rpi-sensehat.osql');
+ *   load_osql('sensehat-streams.osql');
+ *   load_osql('sensehat-compass.osql');
+ *   register_sensehat_pump(2, 4096, 1, 0, 0, 0, 50, 0, 0);
+ *   sensehat:mag_calibrate(30);     -- rotate the board through all orientations
+ *   sensehat:heading();
+ */
+
+/* Hard-iron offset [x, y, z] in µT, subtracted by sensehat:mag(). */
+create function sensehat:mag_offset_tbl(Charstring key_name) -> Vector of Real as stored;
+set sensehat:mag_offset_tbl("offset") = [0.0, 0.0, 0.0];
+
+create function sensehat:mag_offset() -> Vector of Real
+  as sensehat:mag_offset_tbl("offset");
+
+create function sensehat:set_mag_offset(Vector of Real off) -> Vector of Real
+  as { set sensehat:mag_offset_tbl("offset") = off;
+       return off; };
+
+/* Magnetometer [x, y, z] in µT with the hard-iron offset removed. */
+create function sensehat:mag() -> Stream of Vector of Real
+  as select Stream of m - sensehat:mag_offset()
+       from Vector of Real m
+      where m in sensehat:mag_raw();
+
+/* Hard-iron calibration: slowly rotate the board through all orientations
+ * for `secs` seconds. The offset is the per-axis midpoint of min and max;
+ * it is stored (sensehat:mag_offset) and returned with the field range as
+ * [offset, range]. Save it with
+ *   write_file(json:stringify(sensehat:mag_offset()), file)
+ * and restore it with sensehat:set_mag_offset(json:unstringify(read_file(file))). */
+create function sensehat:mag_calibrate(Real secs) -> Vector
+  as { declare Vector of Real lo, Vector of Real hi, Integer n;
+       set lo = [1e9, 1e9, 1e9];
+       set hi = [-1e9, -1e9, -1e9];
+       set n = 0;
+       for m in time_section(sensehat:mag_raw(), 0, secs) {
+         set lo = [min([lo[1], m[1]]), min([lo[2], m[2]]), min([lo[3], m[3]])];
+         set hi = [max([hi[1], m[1]]), max([hi[2], m[2]]), max([hi[3], m[3]])];
+         set n = n + 1;
+       };
+       case when n = 0 then error("sensehat:mag_calibrate: no mag samples (mag_ms = 0?)") end;
+       sensehat:set_mag_offset([(lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2,
+                                (lo[3] + hi[3]) / 2]);
+       return [roundto(sensehat:mag_offset(), 1), roundto(hi - lo, 1)]; };
+
+/* Tilt-compensated heading in degrees (0-360) from accel a [g] and
+ * calibrated magnetometer m [µT]; 0 = the accelerometer's +x axis (the
+ * Pi's USB/Ethernet end) points to magnetic north, rising clockwise.
+ * The magnetometer is first mapped into the accelerometer frame by
+ * flipping x. That mapping was measured on a Sense HAT v2: over a tumble
+ * recording it is the only one of the 48 axis permutations/sign flips
+ * that keeps the angle between field and gravity constant. Then the ST
+ * AN4248 equations are applied.
+ * Accuracy depends on the calibration: the horizontal field is only
+ * ~13-20 µT at high latitudes, so a few µT of offset error moves the
+ * heading by tens of degrees. Calibrate where the board will be used. */
+create function sensehat:heading_of(Vector of Real a, Vector of Real m) -> Real
+  as select roundto(case when h < 0 then h + 360.0 else h end, 1)
+       from Real mx, Real my, Real mz, Real roll, Real pitch,
+            Real bx, Real by, Real h
+      where mx = -m[1] and my = m[2] and mz = m[3]
+        and roll  = atan2(a[2], a[3])
+        and pitch = atan2(-a[1], a[2] * sin(roll) + a[3] * cos(roll))
+        and bx = mx * cos(pitch) + my * sin(pitch) * sin(roll)
+                 + mz * sin(pitch) * cos(roll)
+        and by = my * cos(roll) - mz * sin(roll)
+        and h  = atan2(-by, bx) * 180.0 / pi();
+
+create function sensehat:as_rvec(Object o) -> Vector of Real as o;
+
+/* Compass heading stream, ~10 Hz, relative to MAGNETIC north (add the local
+ * declination for true north; phone compasses usually show true north).
+ * Calibrate first (sensehat:mag_calibrate), where the board will be used:
+ * laptops, monitors, cables and metal furniture bend the weak field. */
+create function sensehat:heading() -> Stream of Real
+  as select Stream of sensehat:heading_of(sensehat:as_rvec(p[1]), sensehat:as_rvec(p[2]))
+       from Vector p
+      where p in sample_every(pivot([sensehat:accel(), sensehat:mag()],
+                                    [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]),
+                              0.1);

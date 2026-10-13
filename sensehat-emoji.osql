@@ -1,0 +1,328 @@
+/*-*-sql-*-
+ * sensehat-emoji.osql — 8x8 colour emojis for the Sense HAT LED matrix
+ * (31 emojis). Loaded by sensehat-display.osql.
+ *
+ * Each emoji is 8 rows of 8 palette letters, top row first. Edit them by eye:
+ *   .  off      W  white    Y  yellow   O  orange   R  red     G  green
+ *   B  blue     C  cyan     M  purple   P  pink     S  grey
+ * Show one with sensehat:show_emoji("smile"); sensehat:emoji_names() lists them all.
+ */
+
+/* Palette: letter -> [r, g, b]. Unknown letters show as off. */
+create function sensehat:emoji_colour(Charstring letter) -> Vector of Integer as stored;
+
+set sensehat:emoji_colour(".") = [0,0,0];   /* off */
+set sensehat:emoji_colour("W") = [255,255,255];   /* white */
+set sensehat:emoji_colour("Y") = [255,200,0];   /* yellow */
+set sensehat:emoji_colour("O") = [255,100,0];   /* orange */
+set sensehat:emoji_colour("R") = [255,0,0];   /* red */
+set sensehat:emoji_colour("G") = [0,200,0];   /* green */
+set sensehat:emoji_colour("B") = [0,60,255];   /* blue */
+set sensehat:emoji_colour("C") = [0,200,200];   /* cyan */
+set sensehat:emoji_colour("M") = [160,0,255];   /* purple */
+set sensehat:emoji_colour("P") = [255,0,120];   /* pink */
+set sensehat:emoji_colour("S") = [90,90,90];   /* grey */
+
+/* Emoji name -> 8 rows of palette letters. */
+create function sensehat:emoji_tbl(Charstring name) -> Vector of Charstring as stored;
+
+/* ---- Faces ---- */
+set sensehat:emoji_tbl("smile") = [
+  "..YYYY..",
+  ".YYYYYY.",
+  "YY.YY.YY",
+  "YYYYYYYY",
+  "Y.YYYY.Y",
+  "YY....YY",
+  ".YYYYYY.",
+  "..YYYY.."];
+set sensehat:emoji_tbl("neutral") = [
+  "..YYYY..",
+  ".YYYYYY.",
+  "YY.YY.YY",
+  "YYYYYYYY",
+  "YYYYYYYY",
+  "YY....YY",
+  ".YYYYYY.",
+  "..YYYY.."];
+set sensehat:emoji_tbl("sad") = [
+  "..YYYY..",
+  ".YYYYYY.",
+  "YY.YY.YY",
+  "YYYYYYYY",
+  "YY....YY",
+  "Y.YYYY.Y",
+  ".YYYYYY.",
+  "..YYYY.."];
+set sensehat:emoji_tbl("wink") = [
+  "..YYYY..",
+  ".YYYYYY.",
+  "YY.YYYYY",
+  "YYYY..YY",
+  "Y.YYYY.Y",
+  "YY....YY",
+  ".YYYYYY.",
+  "..YYYY.."];
+set sensehat:emoji_tbl("surprised") = [
+  "..YYYY..",
+  ".YYYYYY.",
+  "YY.YY.YY",
+  "YYYYYYYY",
+  "YYY..YYY",
+  "YYY..YYY",
+  ".YYYYYY.",
+  "..YYYY.."];
+set sensehat:emoji_tbl("sunglasses") = [
+  "..YYYY..",
+  ".YYYYYY.",
+  "Y......Y",
+  "Y..YY..Y",
+  "YYYYYYYY",
+  "Y.YYYY.Y",
+  ".Y....Y.",
+  "..YYYY.."];
+set sensehat:emoji_tbl("heart") = [
+  ".RR..RR.",
+  "RRRRRRRR",
+  "RRRRRRRR",
+  "RRRRRRRR",
+  ".RRRRRR.",
+  "..RRRR..",
+  "...RR...",
+  "........"];
+
+/* ---- Status ---- */
+set sensehat:emoji_tbl("check") = [
+  "........",
+  ".......G",
+  "......GG",
+  "G....GG.",
+  "GG..GG..",
+  ".GGGG...",
+  "..GG....",
+  "........"];
+set sensehat:emoji_tbl("cross") = [
+  "R......R",
+  "RR....RR",
+  ".RR..RR.",
+  "..RRRR..",
+  "..RRRR..",
+  ".RR..RR.",
+  "RR....RR",
+  "R......R"];
+set sensehat:emoji_tbl("warning") = [
+  "...YY...",
+  "..Y..Y..",
+  ".YY..YY.",
+  ".YY..YY.",
+  "YYY..YYY",
+  "YYYYYYYY",
+  "YYY..YYY",
+  "YYYYYYYY"];
+set sensehat:emoji_tbl("hourglass") = [
+  "OOOOOOOO",
+  ".OYYYYO.",
+  "..OYYO..",
+  "...OO...",
+  "...OO...",
+  "..O..O..",
+  ".OYYYYO.",
+  "OOOOOOOO"];
+set sensehat:emoji_tbl("signal") = [
+  ".......G",
+  ".......G",
+  ".....G.G",
+  ".....G.G",
+  "...G.G.G",
+  "...G.G.G",
+  ".G.G.G.G",
+  ".G.G.G.G"];
+set sensehat:emoji_tbl("plug") = [
+  "..W..W..",
+  "..W..W..",
+  ".WWWWWW.",
+  ".WWWWWW.",
+  ".WWWWWW.",
+  "..WWWW..",
+  "...WW...",
+  "...WW..."];
+set sensehat:emoji_tbl("question") = [
+  "..BBBB..",
+  ".BB..BB.",
+  ".....BB.",
+  "....BB..",
+  "...BB...",
+  "...BB...",
+  "........",
+  "...BB..."];
+
+/* ---- Weather and environment ---- */
+set sensehat:emoji_tbl("sun") = [
+  "Y..YY..Y",
+  ".Y....Y.",
+  "..OOOO..",
+  "YYOOOOYY",
+  "YYOOOOYY",
+  "..OOOO..",
+  ".Y....Y.",
+  "Y..YY..Y"];
+set sensehat:emoji_tbl("cloud") = [
+  "........",
+  "........",
+  "...WWW..",
+  "..WWWWW.",
+  ".WWWWWWW",
+  "WWWWWWWW",
+  ".WWWWWW.",
+  "........"];
+set sensehat:emoji_tbl("rain") = [
+  "...SSS..",
+  "..SSSSS.",
+  ".SSSSSSS",
+  "SSSSSSSS",
+  ".SSSSSS.",
+  ".B..B..B",
+  "B..B..B.",
+  ".B..B..B"];
+set sensehat:emoji_tbl("snow") = [
+  "W..W..W.",
+  ".W.W.W..",
+  "..WWW...",
+  "WWWWWWW.",
+  "..WWW...",
+  ".W.W.W..",
+  "W..W..W.",
+  "........"];
+set sensehat:emoji_tbl("thermometer") = [
+  "...WW...",
+  "..W..W..",
+  "..W..W..",
+  "..WRRW..",
+  "..WRRW..",
+  ".WRRRRW.",
+  ".WRRRRW.",
+  "..WWWW.."];
+set sensehat:emoji_tbl("droplet") = [
+  "...BB...",
+  "...BB...",
+  "..BBBB..",
+  ".BBBBBB.",
+  ".BWBBBB.",
+  ".BBBBBB.",
+  "..BBBB..",
+  "........"];
+
+/* ---- Motion and orientation ---- */
+set sensehat:emoji_tbl("arrow_up") = [
+  "...CC...",
+  "..CCCC..",
+  ".CCCCCC.",
+  "CCCCCCCC",
+  "...CC...",
+  "...CC...",
+  "...CC...",
+  "...CC..."];
+set sensehat:emoji_tbl("arrow_down") = [
+  "...CC...",
+  "...CC...",
+  "...CC...",
+  "...CC...",
+  "CCCCCCCC",
+  ".CCCCCC.",
+  "..CCCC..",
+  "...CC..."];
+set sensehat:emoji_tbl("arrow_left") = [
+  "...C....",
+  "..CC....",
+  ".CCC....",
+  "CCCCCCCC",
+  "CCCCCCCC",
+  ".CCC....",
+  "..CC....",
+  "...C...."];
+set sensehat:emoji_tbl("arrow_right") = [
+  "....C...",
+  "....CC..",
+  "....CCC.",
+  "CCCCCCCC",
+  "CCCCCCCC",
+  "....CCC.",
+  "....CC..",
+  "....C..."];
+set sensehat:emoji_tbl("compass") = [
+  "..SSSS..",
+  ".S.RR.S.",
+  "S..RR..S",
+  "S..RR..S",
+  "S..WW..S",
+  "S..WW..S",
+  ".S.WW.S.",
+  "..SSSS.."];
+set sensehat:emoji_tbl("rotate") = [
+  "..CCC.C.",
+  ".C...CC.",
+  "C...CCC.",
+  "C.......",
+  "C......C",
+  "C......C",
+  ".C....C.",
+  "..CCCC.."];
+
+/* ---- Fun ---- */
+set sensehat:emoji_tbl("invader") = [
+  "...GG...",
+  "..GGGG..",
+  ".GGGGGG.",
+  "GG.GG.GG",
+  "GGGGGGGG",
+  "..G..G..",
+  ".G.GG.G.",
+  "G.G..G.G"];
+set sensehat:emoji_tbl("stream") = [
+  "BB..BB..",
+  "..BB..BB",
+  "........",
+  "CC..CC..",
+  "..CC..CC",
+  "........",
+  "MM..MM..",
+  "..MM..MM"];
+set sensehat:emoji_tbl("snake") = [
+  "........",
+  ".GGGGG..",
+  "GG.GGGG.",
+  "GGGGGG.R",
+  "GGGGGGR.",
+  "GGGGGG.R",
+  ".GGGGG..",
+  "........"];
+set sensehat:emoji_tbl("lightning") = [
+  "....YY..",
+  "...YY...",
+  "..YY....",
+  ".YYYYYY.",
+  "....YY..",
+  "...YY...",
+  "..YY....",
+  ".Y......"];
+
+/* ---- Stream Analyze ---- */
+/* SA logo: two overlapping squares, the overlap cut out. */
+set sensehat:emoji_tbl("sa_logo") = [
+  "WWWWW...",
+  "WWWWW...",
+  "WWWWW...",
+  "WWW..WWW",
+  "WWW..WWW",
+  "...WWWWW",
+  "...WWWWW",
+  "...WWWWW"];
+
+/* All emoji names, grouped as above (e.g. for a demo that shows them all). */
+create function sensehat:emoji_names() -> Vector of Charstring
+  as ["smile", "neutral", "sad", "wink", "surprised", "sunglasses",
+      "heart", "check", "cross", "warning", "hourglass", "signal",
+      "plug", "question", "sun", "cloud", "rain", "snow",
+      "thermometer", "droplet", "arrow_up", "arrow_down", "arrow_left", "arrow_right",
+      "compass", "rotate", "invader", "stream", "snake", "lightning",
+      "sa_logo"];

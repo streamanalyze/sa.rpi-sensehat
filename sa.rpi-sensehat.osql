@@ -7,10 +7,15 @@
  * subscribe or subscribe:merge.
  *
  * Flow topics:
- *   sensehat:accel    — Timeval([ax,ay,az])   at IMU ODR
- *   sensehat:gyro     — Timeval([gx,gy,gz])   at IMU ODR (if enabled)
- *   sensehat:pressure — Timeval(hPa)          at env_ms
- *   sensehat:temp     — Timeval(°C)           at env_ms
+ *   sensehat:accel         — Timeval([ax,ay,az]) g     at IMU ODR (if enabled)
+ *   sensehat:gyro          — Timeval([gx,gy,gz]) dps   at IMU ODR (if enabled)
+ *   sensehat:pressure      — Timeval(hPa)              at pressure_ms (env_ms)
+ *   sensehat:temp          — Timeval(°C, LPS25H)       at pressure_ms (env_ms)
+ *   sensehat:humidity      — Timeval(%rH)              at humidity_ms (env_ms)
+ *   sensehat:humidity_temp — Timeval(°C, HTS221)       at humidity_ms (env_ms)
+ *   sensehat:mag           — Timeval([mx,my,mz]) µT    at mag_ms    (9-arg register)
+ *   sensehat:colour        — Timeval([r,g,b,c])        at colour_ms (9-arg register, v2 only)
+ *   sensehat:joystick      — Timeval([dir,action])     on events    (9-arg register)
  *
  * Load with:
  *   sa.engine -O sa.rpi-sensehat.osql
@@ -31,7 +36,7 @@ load_extension("rpi-sensehat");
  * odr         — LSM9DS1 output data rate (1-6):
  *               1=14.9Hz 2=59.5Hz 3=119Hz 4=238Hz 5=476Hz 6=952Hz
  * bufsize     — circular-buffer capacity in items
- * env_ms      — pressure/temp polling interval in ms (0 = disabled)
+ * env_ms      — pressure/temp/humidity polling interval in ms (0 = disabled)
  * enable_gyro — 0 = accel only (saves I2C bandwidth),
  *               1 = accel + gyro
  */
@@ -39,6 +44,36 @@ create function register_sensehat_pump(Integer odr, Integer bufsize,
                                        Integer env_ms, Integer enable_gyro)
   -> Charstring
   as foreign 'register-sensehat-pump----+';
+
+/* Register the sensehat datapump, every sensor named:
+ * odr         — LSM9DS1 output data rate (1-6), as above
+ * bufsize     — circular-buffer capacity in items
+ * accel       — 1 = stream the accelerometer, 0 = off
+ * gyro        — 1 = stream the gyroscope (needs accel), 0 = off;
+ *               accel and gyro both off = the IMU is not read at all
+ * pressure_ms — LPS25H pressure + temperature interval in ms (0 = off)
+ * humidity_ms — HTS221 humidity + temperature interval in ms (0 = off)
+ * mag_ms      — magnetometer interval in ms (0 = off)
+ * colour_ms   — colour sensor interval in ms (0 = off; the sensor
+ *               integrates for 154 ms, so >= 154 is useful)
+ * joystick    — 1 = stream joystick events, 0 = off
+ *
+ * Both register functions check the I2C bus budget first: a request
+ * needing more transactions per second than the bus can serve (e.g.
+ * accel + gyro at ODR 6, 1904/s against ~1050/s at 100 kHz) raises
+ * "sensehat: request exceeds the I2C bus budget ..." with the needed
+ * transactions/s, instead of silently delivering fewer samples. The
+ * budget assumes the Pi's VPU core clock is fixed (core_freq_min=500 in
+ * config.txt): the I2C clock is divided from it.
+ * Registering while a pump runs stops the running pump first.
+ */
+create function register_sensehat_pump(Integer odr, Integer bufsize,
+                                       Integer accel, Integer gyro,
+                                       Integer pressure_ms, Integer humidity_ms,
+                                       Integer mag_ms, Integer colour_ms,
+                                       Integer joystick)
+  -> Charstring
+  as foreign 'register-sensehat-pump-all---------+';
 
 /* Stop a running pump so it can be re-registered with new settings.
  * Returns 1 if a pump was stopped, 0 if nothing was running.
@@ -58,7 +93,8 @@ create function sensehat:stop() -> Integer
  * ================================================================ */
 
 /* Subscribe to a single sensehat flow by name.
- * flow_name is one of: "accel", "gyro", "pressure", "temp".
+ * flow_name is one of: "accel", "gyro", "pressure", "temp", "humidity",
+ * "humidity_temp", "mag", "colour", "joystick".
  */
 create function sensehat:flow(Charstring flow_name)
   -> Stream of Timeval
@@ -72,7 +108,7 @@ create function sensehat:flow_topics(Vector of Charstring flows)
       where f in flows;
 
 /* Subscribe to multiple sensehat flows merged into one stream.
- * flows is a vector of one or more of: "accel", "gyro", "pressure", "temp".
+ * flows is a vector of one or more flow names (see sensehat:flow).
  *
  * Example:
  *   sensehat:signal_flows(["accel","temp"])
@@ -97,22 +133,36 @@ create function sensehat:flows_after(Vector of Charstring flows, Timeval since)
       where v in sensehat:signal_flows(flows)
         and timestamp(v) >= since;
 
+/* Consumers currently attached to a flow, from the engine's flows():
+ * 0 when none (or the flow has not been subscribed yet). A consumer that
+ * stops reading while attached makes the pump lose samples for everyone
+ * once it is 1000 items behind (see "Consumers" in the README), so a
+ * count that stays above what you expect points at a stuck query.
+ * Ended queries are detached on the next push, so read it with the pump
+ * running. */
+create function sensehat:consumers(Charstring flow_name) -> Integer
+  as coalesce(sum(select cast(r["consumers"] as Integer)
+                    from Record r
+                   where r in flows()
+                     and r["name"] = "sensehat:" + flow_name), 0);
+
 /* ================================================================
  * Payload accessors
  *
  * Each item is Timeval of [flow_name, payload].
  * ================================================================ */
 
-/* Flow name string ("accel", "gyro", "pressure", "temp"). */
+/* Flow name string ("accel", "gyro", "pressure", "temp", "humidity",
+ * "humidity_temp", "mag", "colour", "joystick"). */
 create function sensehat:topic(Timeval tv) -> Charstring as value(tv)[1];
 
 /* Raw payload (second element of the wrapper vector). */
 create function sensehat:payload(Timeval tv) -> Object as value(tv)[2];
 
-/* 3-vector payload (accel or gyro items). */
+/* 3-vector payload (accel, gyro or mag items). */
 create function sensehat:xyz(Timeval tv) -> Vector of Real as value(tv)[2];
 
-/* Scalar payload (pressure or temp items). */
+/* Scalar payload (pressure, temp, humidity or humidity_temp items). */
 create function sensehat:scalar(Timeval tv) -> Real as value(tv)[2];
 
 /* Acceleration magnitude (g) — for accel items. */
@@ -120,3 +170,38 @@ create function sensehat:accel_mag(Timeval tv) -> Real
   as select sqrt(v[1]*v[1] + v[2]*v[2] + v[3]*v[3])
        from Vector of Real v
       where v = sensehat:xyz(tv);
+
+/* 4-vector payload [r, g, b, clear] (colour items, raw counts). */
+create function sensehat:rgbc(Timeval tv) -> Vector of Integer as value(tv)[2];
+
+/* Joystick payload [direction, action]:
+ * direction "up" | "down" | "left" | "right" | "middle",
+ * action "press" | "release" | "hold". */
+create function sensehat:key(Timeval tv) -> Vector of Charstring as value(tv)[2];
+
+/* ================================================================
+ * LED matrix (8x8). Independent of the pump. Colours are 0-255 and
+ * stored as RGB565, so reading back quantises to multiples of 8
+ * (red, blue) and 4 (green). x = column, y = row, both 0-7.
+ * ================================================================ */
+
+/* Fill all 64 pixels with one colour. */
+create function sensehat:led_clear(Integer r, Integer g, Integer b) -> Integer
+  as foreign 'sensehat-led-clear---+';
+
+/* Set one pixel. */
+create function sensehat:led_pixel(Integer x, Integer y,
+                                   Integer r, Integer g, Integer b) -> Integer
+  as foreign 'sensehat-led-pixel-----+';
+
+/* Set all pixels: 64 x [r, g, b], row-major (index = y*8 + x). */
+create function sensehat:led_pixels(Vector px) -> Integer
+  as foreign 'sensehat-led-pixels-+';
+
+/* Read the 64 pixels back from the display as [r, g, b]. */
+create function sensehat:led_get_pixels() -> Vector
+  as foreign 'sensehat-led-get-pixels+';
+
+/* Dim (1) or normal (0) brightness via the driver's gamma table. */
+create function sensehat:led_low_light(Integer enable) -> Integer
+  as foreign 'sensehat-led-low-light-+';
